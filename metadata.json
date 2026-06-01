@@ -1,0 +1,6 @@
+{
+  "name": "스마랑 한인교회",
+  "description": "인도네시아 스마랑 한인교회(Semarang Korean Church)의 말씀 위에 든든히 서가는 공식 홈페이지입니다. 주간 주보, 설교 영상, 교회 소식, 온/오프라인 새가족 안내 및 관리자 게시 기능을 제공합니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
