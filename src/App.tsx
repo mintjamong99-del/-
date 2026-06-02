@@ -287,6 +287,15 @@ export default function App() {
   const [editingNotice, setEditingNotice] = useState<Notice | null>(null);
   const [editingEvent, setEditingEvent] = useState<EventSchedule | null>(null);
   const [editingRegistration, setEditingRegistration] = useState<NewcomerRegistration | null>(null);
+  const [isAddingRegistration, setIsAddingRegistration] = useState<boolean>(false);
+  const [newRegFormInput, setNewRegFormInput] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    address: '',
+    birthDate: '',
+    notes: ''
+  });
   const [editingPrayer, setEditingPrayer] = useState<PrayerRequest | null>(null);
   
   // Inline CMS states for Worship & Word Sidebar
@@ -647,10 +656,8 @@ export default function App() {
     };
   }, [isAdminAuthenticated]);
 
-  // Sync Registrations in real-time only if Admin is authenticated (Secure Attribute Check)
+  // Sync Registrations in real-time for everyone (secured Selective Rendering in UI)
   useEffect(() => {
-    if (!isAdminAuthenticated) return;
-
     const defaultRegistrations: NewcomerRegistration[] = [
       { id: 'reg-1', name: '민정우', phone: '+62 812-3456-7890', email: 'jungwoo@gmail.com', address: 'Jl. Pemuda No.45, Semarang Tengah', birthDate: '1995-11-12', notes: '자카르타에서 이번 달에 인도네시아 스마랑 지사로 발령받아 이사 온 청년입니다. 교제와 예배 말씀 위에 견고해지고 싶습니다.', createdAt: '2026-05-29 14:20', status: '완료' },
       { id: 'reg-2', name: '이하은', phone: '+62 821-9988-7766', email: 'haeun99@naver.com', address: 'Jl. Sultan Agung Apartment Green Hills Room 802', birthDate: '1998-04-05', notes: '스마랑에서 대학 연구원으로 1년 거주 예정입니다. 주일 2부 대예배 참석하고 교제 나누고 싶어요!', createdAt: '2026-05-30 09:12', status: '대기' }
@@ -659,21 +666,23 @@ export default function App() {
     const registrationsQuery = query(collection(db, 'registrations'), orderBy('createdAt', 'desc'));
     const unsubscribeRegs = onSnapshot(registrationsQuery, (snapshot) => {
       if (snapshot.empty) {
-        defaultRegistrations.forEach(async (r) => {
-          try {
-            await setDoc(doc(db, 'registrations', r.id), {
-              id: r.id,
-              name: r.name,
-              phone: r.phone,
-              dept: '새가족부',
-              remark: r.notes || '',
-              date: r.createdAt.substring(0, 10),
-              createdAt: serverTimestamp()
-            });
-          } catch (e) {
-            console.error(e);
-          }
-        });
+        if (isAdminAuthenticated) {
+          defaultRegistrations.forEach(async (r) => {
+            try {
+              await setDoc(doc(db, 'registrations', r.id), {
+                id: r.id,
+                name: r.name,
+                phone: r.phone,
+                dept: '새가족부',
+                remark: r.notes || '',
+                date: r.createdAt.substring(0, 10),
+                createdAt: serverTimestamp()
+              });
+            } catch (e) {
+              console.error(e);
+            }
+          });
+        }
       } else {
         const items = snapshot.docs.map(d => {
           const parsed = parseDoc(d);
@@ -692,7 +701,11 @@ export default function App() {
         setRegistrations(items);
       }
     }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, 'registrations');
+      if (isAdminAuthenticated) {
+        handleFirestoreError(err, OperationType.LIST, 'registrations');
+      } else {
+        console.warn('Registrations sync warning:', err);
+      }
     });
 
     return () => unsubscribeRegs();
@@ -1347,6 +1360,68 @@ export default function App() {
       } catch (err: any) {
         handleFirestoreError(err, OperationType.DELETE, `registrations/${id}`);
       }
+    }
+  };
+
+  const handleAddNewcomerSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!checkMutationPermission()) return;
+    if (!newRegFormInput.name || !newRegFormInput.phone) {
+      alert('성명과 연락처는 필수 기입 사항입니다.');
+      return;
+    }
+    try {
+      const docId = 'reg-' + Date.now();
+      await setDoc(doc(db, 'registrations', docId), {
+        id: docId,
+        name: newRegFormInput.name,
+        phone: newRegFormInput.phone,
+        email: newRegFormInput.email || '',
+        address: newRegFormInput.address || '',
+        birthDate: newRegFormInput.birthDate || '',
+        remark: newRegFormInput.notes || '',
+        dept: '새가족부',
+        status: '대기',
+        createdAt: serverTimestamp()
+      });
+      alert('새가족(새신자) 등록 신청이 성공적으로 입력되었습니다.');
+      setIsAddingRegistration(false);
+      setNewRegFormInput({ name: '', phone: '', email: '', address: '', birthDate: '', notes: '' });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'registrations');
+    }
+  };
+
+  const handlePublishRegistrationToNotice = async (reg: NewcomerRegistration) => {
+    if (!checkMutationPermission()) return;
+    
+    const confirmPublish = confirm(`[${reg.name}] 성도님의 환영 인사를 교회소식(소식 유형)란에 등록 게시합니까?`);
+    if (!confirmPublish) return;
+
+    try {
+      const docId = 'n-reg-' + Date.now();
+      const welcomeTitle = `[새가족 환영] 주님의 이름으로 오신 새식구 ${reg.name} 성도님을 환영합니다!`;
+      const welcomeContent = `스마랑 한인교회의 새로운 지체로 등록되신 ${reg.name} 성도님을 주님의 이름으로 온 성도와 함께 기쁨으로 환영하고 축복합니다!\n\n` +
+        `🌱 새가족 소개\n` +
+        `- 성명: ${reg.name}\n` +
+        `${reg.birthDate ? `- 생년월일: ${reg.birthDate}\n` : ''}` +
+        `${reg.address ? `- 거주 주소: ${reg.address}\n` : ''}` +
+        `${reg.notes ? `\n💬 소개 및 비고:\n${reg.notes}\n` : ''}\n` +
+        `인도네시아 스마랑에서 소중한 믿음의 가정을 이루어 가실 수 있도록 따뜻한 사랑의 인사와 많은 중보기도를 부탁드립니다. 환영합니다! ❤️`;
+
+      await setDoc(doc(db, 'notices', docId), {
+        id: docId,
+        category: '소식',
+        title: welcomeTitle,
+        content: welcomeContent,
+        date: new Date().toISOString().substring(0, 10),
+        author: '새가족부',
+        views: 0,
+        createdAt: serverTimestamp()
+      });
+      alert(`[${reg.name}] 새가족 환영 소식이 성공적으로 교회소식란에 게시되었습니다! '교회 소식 및 예배' 탭에서 확인하실 수 있습니다.`);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'notices');
     }
   };
 
@@ -2852,6 +2927,70 @@ export default function App() {
 
             </div>
 
+            {/* Newcomer Welcoming List (새신자/새가족 환영 목록) */}
+            <div className="mt-12 bg-[#FAFBF9] border border-emerald-100/70 p-6 sm:p-8 rounded-3xl shadow-sm mb-12">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                <div>
+                  <h3 className="text-2xl font-serif font-bold text-gray-800 flex items-center gap-2">
+                    <span className="text-xl">🌱</span> 반갑고 축복합니다! 새가족 등록현황
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-1">스마랑 한인교회의 동역자이자 새로운 믿음의 형제자매로 등록되신 분들입니다.</p>
+                </div>
+                <div className="bg-[#2D5A27]/10 text-[#2D5A27] font-semibold text-xs py-1.5 px-3 rounded-full border border-[#2D5A27]/25 self-start sm:self-auto">
+                  새가족 총 {registrations.length}명
+                </div>
+              </div>
+
+              {registrations.length === 0 ? (
+                <div className="bg-white/50 border border-dashed text-center p-8 rounded-2xl text-xs text-gray-400">
+                  등록되신 새가족이 없습니다. 관리자 탭에서 신규 등록을 해주세요.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {registrations.map((reg) => {
+                    const regDate = reg.createdAt 
+                      ? (typeof reg.createdAt === 'string' 
+                          ? reg.createdAt.substring(0, 10) 
+                          : (reg.createdAt?.seconds 
+                              ? new Date(reg.createdAt.seconds * 1000).toISOString().substring(0, 10)
+                              : ''))
+                      : '';
+                    return (
+                      <div key={reg.id} className="bg-white border border-gray-150 p-4.5 rounded-2xl shadow-xs hover:shadow-md transition-all flex flex-col justify-between">
+                        <div>
+                          <div className="flex justify-between items-center mb-2">
+                            <span className="font-bold text-gray-800 text-sm flex items-center gap-1">
+                              👋 {reg.name} 성도님
+                            </span>
+                            <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                              reg.status === '완료' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                            }`}>
+                              {reg.status || '대기'}
+                            </span>
+                          </div>
+                          
+                          <div className="flex items-center gap-2 text-[10px] text-gray-400 font-mono mb-3">
+                            <span>📅 등록일: {regDate || '최근'}</span>
+                            <span>•</span>
+                            <span>소속: 새가족부</span>
+                          </div>
+
+                          <p className="text-xs text-gray-650 leading-relaxed bg-gray-50/70 p-3 rounded-xl italic">
+                            {reg.notes ? `"${reg.notes}"` : '"스마랑 한인교회의 한 식구로 오신 것을 환영하며 주님의 사랑을 나눕니다."'}
+                          </p>
+                        </div>
+
+                        <div className="border-t border-gray-100 mt-4 pt-3 flex justify-between items-center text-[10px] text-gray-400">
+                          <span>스마랑 한인교회</span>
+                          <span className="text-[#2D5A27] font-semibold">❤️ 주님의 이름으로 축복합니다</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             {/* Church General Notices / Feed (Keeping in a very beautiful minimal look at the bottom) */}
             <div className="mt-12">
               <h3 className="text-2xl font-serif font-bold text-gray-800 mb-2">교인 행정공지 및 소식록</h3>
@@ -4308,6 +4447,14 @@ export default function App() {
                         <h4 className="font-bold text-gray-800 text-sm flex items-center gap-1.5 bg-white">
                           🌱 새가족 등록 신청 명단 ({registrations.length}명)
                         </h4>
+                        {!editingRegistration && !isAddingRegistration && (
+                          <button
+                            onClick={() => setIsAddingRegistration(true)}
+                            className="bg-emerald-50 text-[#2D5A27] border border-emerald-200 px-2.5 py-1 rounded-lg text-xs font-bold hover:bg-[#2D5A27] hover:text-white transition-all cursor-pointer"
+                          >
+                            + 신규 등록
+                          </button>
+                        )}
                       </div>
 
                       {editingRegistration ? (
@@ -4402,6 +4549,93 @@ export default function App() {
                             </div>
                           </div>
                         </form>
+                      ) : isAddingRegistration ? (
+                        <form onSubmit={handleAddNewcomerSubmit} className="space-y-3 text-xs bg-emerald-50/40 p-3.5 border rounded-2xl">
+                          <p className="font-bold text-[#2D5A27] text-xs">🌱 새가족 신규 등록 (입력)</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">성명 *</label>
+                              <input 
+                                type="text" 
+                                required
+                                value={newRegFormInput.name}
+                                onChange={(e) => setNewRegFormInput({ ...newRegFormInput, name: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                                placeholder="성명 입력"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">연락처 *</label>
+                              <input 
+                                type="text" 
+                                required
+                                value={newRegFormInput.phone}
+                                onChange={(e) => setNewRegFormInput({ ...newRegFormInput, phone: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                                placeholder="연락처 입력"
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">이메일</label>
+                              <input 
+                                type="email" 
+                                value={newRegFormInput.email}
+                                onChange={(e) => setNewRegFormInput({ ...newRegFormInput, email: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                                placeholder="이메일 입력 (선택)"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">생년월일</label>
+                              <input 
+                                type="text" 
+                                placeholder="YYYY-MM-DD"
+                                value={newRegFormInput.birthDate}
+                                onChange={(e) => setNewRegFormInput({ ...newRegFormInput, birthDate: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-gray-700 font-bold mb-1">거주 주소</label>
+                            <input 
+                              type="text" 
+                              value={newRegFormInput.address}
+                              onChange={(e) => setNewRegFormInput({ ...newRegFormInput, address: e.target.value })}
+                              className="w-full border p-2 rounded-lg bg-white"
+                              placeholder="거주 주소 입력"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-gray-700 font-bold mb-1">건의/비고 설명</label>
+                            <textarea 
+                              value={newRegFormInput.notes}
+                              onChange={(e) => setNewRegFormInput({ ...newRegFormInput, notes: e.target.value })}
+                              className="w-full border p-2 rounded-lg bg-white h-16 resize-none"
+                              placeholder="인도자나 비고 사항 기술"
+                            />
+                          </div>
+                          <div className="flex items-center gap-1.5 justify-end">
+                            <button 
+                              type="button"
+                              onClick={() => {
+                                setIsAddingRegistration(false);
+                                setNewRegFormInput({ name: '', phone: '', email: '', address: '', birthDate: '', notes: '' });
+                              }}
+                              className="bg-gray-100 border text-gray-650 hover:bg-gray-200 px-3 py-2 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                            >
+                              취소
+                            </button>
+                            <button 
+                              type="submit"
+                              className="bg-[#2D5A27] text-white hover:bg-opacity-95 px-3 py-2 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                            >
+                              등록완료
+                            </button>
+                          </div>
+                        </form>
                       ) : (
                         <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
                           {registrations.length === 0 ? (
@@ -4438,6 +4672,14 @@ export default function App() {
                                   )}
                                 </div>
                                 <div className="flex justify-end gap-1.5 mt-3 pt-2 border-t border-gray-155">
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePublishRegistrationToNotice(reg)}
+                                    className="px-2.5 py-1 text-[10px] bg-emerald-50 border border-emerald-200 text-[#2D5A27] hover:bg-[#2D5A27] hover:text-white rounded-lg flex items-center gap-1 cursor-pointer transition-colors font-bold"
+                                    title="교회 소식란에 환영 공지로 게시하기"
+                                  >
+                                    📢 소식 게시
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() => setEditingRegistration(reg)}
