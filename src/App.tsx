@@ -3096,6 +3096,7 @@ export default function App() {
                   </div>
                 </div>
                 <button
+                  type="button"
                   onClick={() => setActiveTab('admin')}
                   className="bg-[#2D5A27]/10 hover:bg-[#2D5A27]/20 text-[#2D5A27] font-bold py-2 px-3.5 rounded-xl transition-all whitespace-nowrap text-[11px] shrink-0 cursor-pointer"
                 >
@@ -3323,22 +3324,58 @@ export default function App() {
                           }
                         }
                       } catch (err: any) {
-                        setAdminLoginError('구글 로그인 중 오류가 발생했습니다.');
+                        console.error("Google Auth error detailed structure:", err);
+                        const errCode = err?.code || 'unknown';
+                        const errMsg = err?.message || String(err);
+                        
+                        let customMsg = `구글 로그인 실패 (오류 코드: ${errCode})\n\n`;
+                        
+                        if (errCode === 'auth/popup-blocked') {
+                          customMsg += "🚨 브라우저의 팝업 차단(Block Popups)이 활성화되어 로그인이 차단되었습니다! 주소창 우측에서 팝업 허용을 활성화하시거나 '새창 열기'로 시도해주세요.";
+                        } else if (errCode === 'auth/cancelled-popup-request') {
+                          customMsg += "ℹ️ 로그인 창이 열렸으나 완료 전 닫혔거나 중단되었습니다. 다시 시도해주세요.";
+                        } else if (errCode === 'auth/popup-closed-by-user') {
+                          customMsg += "ℹ️ 로그인 팝업창이 사용자에 의해 직접 닫혔습니다.";
+                        } else if (errCode === 'auth/operation-not-allowed') {
+                          customMsg += "🚨 [설정 오류] Firebase Auth 콘솔 -> 'Sign-in method'에서 'Google' 로그인 제공업체(Provider)가 현재 활성화(Enabled) 상태인지 점검해주세요!";
+                        } else if (errCode === 'auth/unauthorized-domain') {
+                          customMsg += "🚨 [도메인 승인 오류] Firebase 콘솔 -> Auth -> Settings -> 'Authorized domains'에 현재 개발용 URL 도메인이 승인 대상(Authorize)으로 추가되어 있는지 확인해 주세요.";
+                        } else {
+                          customMsg += `상세 메시지: ${errMsg}\n\n💡 미리보기 프레임(iFrame) 크로스 도메인 보안 제약일 수 있습니다. 본 화면 우측 상단의 [새창 열기 (Open in new tab)] 단독 탭으로 실행하시면 즉시 100% 한 번에 정상적으로 동작합니다!`;
+                        }
+                        
+                        setAdminLoginError(customMsg);
                       }
                     }}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-white border border-gray-300 text-gray-700 font-bold rounded-xl text-xs hover:bg-gray-50 transition-all shadow-sm"
+                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-[#4285F4] hover:bg-blue-600 text-white font-extrabold rounded-xl text-xs transition-all shadow-sm cursor-pointer"
                   >
-                    <svg className="w-4 h-4" viewBox="0 0 24 24" width="16" height="16">
+                    <svg className="w-4 h-4 bg-white p-0.5 rounded-full shrink-0" viewBox="0 0 24 24" width="16" height="16">
                       <path fill="#EA4335" d="M12 5.04c1.67 0 3.14.58 4.31 1.7L19.5 3.5C17.48 1.63 14.93.5 12 .5 7.42.5 3.53 3.12 1.63 6.95l3.87 3a6.97 6.97 0 0 1 6.5-4.91z" />
                       <path fill="#4285F4" d="M23.5 12.25c0-.82-.07-1.61-.21-2.38H12v4.51h6.46a5.52 5.52 0 0 1-2.4 3.62l3.73 2.9c2.18-2 3.71-4.96 3.71-8.65z" fillRule="evenodd" clipRule="evenodd" />
                       <path fill="#FBBC05" d="M5.5 14.53a6.94 6.94 0 0 1 0-5.06l-3.87-3A11.96 11.96 0 0 0 .5 12c0 2.02.51 3.93 1.39 5.61l3.61-3.08z" fillRule="evenodd" clipRule="evenodd" />
                       <path fill="#34A853" d="M12 23.5c3.24 0 5.97-1.08 7.96-2.9l-3.73-2.9c-1.1.75-2.52 1.19-4.23 1.19a6.97 6.97 0 0 1-6.5-4.91l-3.87 3A11.93 11.93 0 0 0 12 23.5z" fillRule="evenodd" clipRule="evenodd" />
                     </svg>
-                    Google 관리자 계정으로 로그인 (수정/삭제 권한)
+                    Google 계정으로 관리자 로그인
                   </button>
-                  <p className="text-[10px] text-gray-400 mt-2">
-                    데이터 수정/삭제 작업을 하시려면 반드시 등록된 구글 계정으로 로그인해 주십시오. (Firestore 규칙 실시간 연동 강화)
-                  </p>
+
+                  {/* PRO-TIPS AND DIALOG TROUBLESHOOTING BOX */}
+                  <div className="bg-gray-50 border border-gray-150 rounded-2xl p-4 text-left space-y-2 mt-4">
+                    <p className="text-[11px] font-bold text-gray-800 flex items-center gap-1">
+                      💡 로그인 실패 시 해결 조치 가이드
+                    </p>
+                    <ul className="text-[10px] text-gray-500 space-y-1.5 list-disc pl-3.5 leading-normal">
+                      <li>
+                        <strong className="text-[#2D5A27]">가장 확실한 방법 [새창 실행]</strong>: 
+                        현재 AI Studio의 <span className="underline">아이프레임(iFrame) 미리보기 내부</span>에서는 브라우저의 크로스-사이트 쿠키 제약으로 소셜 로그인이 가단될 수 있습니다. <strong>우측 최상단의 [주소창 열람 / Open in new tab] 아이콘</strong>을 클릭하여 크고 넓은 전체 화면 탭으로 접속하신 뒤 로그인을 선택하면 즉시 완벽하게 Google Authenticator 처리가 연동됩니다.
+                      </li>
+                      <li>
+                        <strong>브라우저 팝업 허용</strong>: 클릭 시 팝업 창이 열릴 수 있도록 현재 주소 표시줄 근처에 활성화된 <strong>'팝업 차단 아이콘'</strong>을 누르고 항상 허용으로 지정해 주세요.
+                      </li>
+                      <li>
+                        <strong>Firebase Google Provider 활성화</strong>: Firebase auth 콘솔 내의 <strong>'Authentication &gt; Sign-in method'</strong> 메뉴에서 <strong>'Google'</strong> 소셜 로그인이 활성화 상태(Enabled)인지 최종 확인해주세요!
+                      </li>
+                    </ul>
+                  </div>
                 </div>
               </div>
             ) : (
