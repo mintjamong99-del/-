@@ -3289,7 +3289,49 @@ export default function App() {
                     onChange={(e) => setAdminPassword(e.target.value)}
                     className="w-full border p-3 rounded-xl bg-gray-50 focus:outline-none focus:ring-1 focus:ring-[#2D5A27] text-center text-sm font-mono"
                   />
-                  {adminLoginError && <p className="text-[11px] text-red-500 font-bold">{adminLoginError}</p>}
+                  {adminLoginError && (
+                    <div className="text-[12px] text-red-600 font-bold bg-ref/5 mt-2 rounded-xl text-left">
+                      {adminLoginError.includes('unauthorized-domain') || adminLoginError.includes('domain') || adminLoginError.includes('도메인') ? (
+                        <div className="bg-red-50 border border-red-200 p-4 rounded-2xl text-gray-800 font-normal space-y-3 text-xs">
+                          <p className="font-extrabold text-red-600 text-sm flex items-center gap-1">
+                            🚨 도메인 승인 필요 (Unauthorized Domain Error)
+                          </p>
+                          <p className="leading-relaxed">
+                            현재 접속하신 외망 주소 <strong className="text-red-700 font-bold underline font-mono select-all bg-white px-1.5 py-0.5 rounded border border-red-150">{window.location.hostname}</strong>가 Firebase Console에 승인된 도메인으로 등록되어 있지 않아 구글 로그인이 차단되었습니다.
+                          </p>
+                          <div className="bg-white border rounded-xl p-3 space-y-2 text-[11px] text-gray-700 shadow-inner">
+                            <p className="font-bold text-gray-900 border-b pb-1">🛠️ 해결 방법 (1분 소요):</p>
+                            <ol className="list-decimal pl-4.5 space-y-1.5 leading-normal">
+                              <li>
+                                <a 
+                                  href="https://console.firebase.google.com/project/formidable-bazaar-l8gvj/authentication/settings" 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="text-[#4285F4] hover:underline font-extrabold inline-flex items-center gap-0.5 bg-blue-50 px-2 py-0.5 rounded border border-blue-100"
+                                >
+                                  Firebase Console - 관리자 설정 바로가기 🔗
+                                </a>
+                              </li>
+                              <li>
+                                중앙의 <strong>"승인된 도메인" (Authorized domains)</strong> 목록으로 스크롤합니다.
+                              </li>
+                              <li>
+                                <strong>"도메인 추가" (Add domain)</strong> 버튼을 클릭합니다.
+                              </li>
+                              <li>
+                                복사해 둘 현재 주소: <code className="bg-amber-100 text-amber-850 px-1 py-0.5 rounded font-bold font-mono select-all select-none">{window.location.hostname}</code> (또는 <code className="bg-amber-105 text-amber-900 px-1 py-0.5 rounded font-bold font-mono select-all">sage-daifuku-2b3f0e.netlify.app</code>)를 소문자로 정확히 기입하여 등록을 마칩니다.
+                              </li>
+                            </ol>
+                          </div>
+                          <p className="text-[10px] text-gray-400 italic font-medium leading-relaxed">
+                            💡 Firebase 등록을 완료하신 후, 브라우저 창을 새로고침(F5)하여 다시 Google 계정 로그인을 누르시면 즉시 정상 정상 가동됩니다!
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-red-500 font-bold whitespace-pre-line text-center">{adminLoginError}</p>
+                      )}
+                    </div>
+                  )}
                   
                   <button 
                     type="submit"
