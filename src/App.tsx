@@ -724,10 +724,6 @@ export default function App() {
       alert('관리자 권한을 위한 로그인이 되어 있지 않습니다.');
       return false;
     }
-    if (!isGoogleAdminUser) {
-      alert('⚠️ 수정/삭제 권한이 없습니다.\n\n정정과 삭제는 등록된 Google 시스템 관리자만 가능합니다. "Google 관리자 계정으로 로그인"을 해주십시오. (현재 일반 조회 모드로 보기만 가능합니다.)');
-      return false;
-    }
     return true;
   };
 
@@ -3435,9 +3431,13 @@ export default function App() {
                         데이터 수정/삭제 권한이 부여되는 Google 로그인 계정을 등록·해제합니다. (최대 5명 제한)
                       </p>
                     </div>
-                    {!isGoogleAdminUser && (
-                      <span className="shrink-0 text-[10px] bg-amber-50 text-[#D69E2E] border border-amber-200 px-2 py-1 rounded-lg font-bold">
-                        ⚠️ 일반 로그인 조회 모드 (정정/삭제 불가)
+                    {!isGoogleAdminUser ? (
+                      <span className="shrink-0 text-[10px] bg-emerald-50 text-[#2D5A27] border border-emerald-250 px-2 py-1 rounded-lg font-bold">
+                        ✅ 일반 관리자 로그인 모드 (정정/삭제 가능)
+                      </span>
+                    ) : (
+                      <span className="shrink-0 text-[10px] bg-blue-50 text-[#4285F4] border border-blue-200 px-2 py-1 rounded-lg font-bold">
+                        👤 Google 관리자 로그인 모드 (정정/삭제 가능)
                       </span>
                     )}
                   </div>
@@ -3451,7 +3451,7 @@ export default function App() {
                           <input 
                             type="email" 
                             required
-                            disabled={!isGoogleAdminUser || adminEmails.length >= 5}
+                            disabled={!isAdminAuthenticated || adminEmails.length >= 5}
                             placeholder={adminEmails.length >= 5 ? "최대인원(5명) 가득 참" : "example@gmail.com"}
                             value={newAdminEmail}
                             onChange={(e) => setNewAdminEmail(e.target.value)}
@@ -3459,7 +3459,7 @@ export default function App() {
                           />
                           <button 
                             type="submit"
-                            disabled={!isGoogleAdminUser || adminEmails.length >= 5}
+                            disabled={!isAdminAuthenticated || adminEmails.length >= 5}
                             className="bg-[#2D5A27] hover:bg-opacity-90 disabled:bg-gray-300 text-white px-4 py-2.5 rounded-xl font-bold transition-all shrink-0 cursor-pointer text-xs"
                           >
                             등록
@@ -3481,7 +3481,7 @@ export default function App() {
                             {email.toLowerCase() !== 'mintjamong99@gmail.com' ? (
                               <button 
                                 type="button"
-                                disabled={!isGoogleAdminUser}
+                                disabled={!isAdminAuthenticated}
                                 onClick={() => handleRemoveAdminEmail(email)}
                                 className="text-red-500 hover:text-red-700 disabled:opacity-30 p-1 cursor-pointer"
                                 title="권한 삭제"

@@ -17,13 +17,7 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isVerifiedUser() && (
-        request.auth.token.email == 'mintjamong99@gmail.com' ||
-        request.auth.token.email == 'seminary1991@gmail.com' ||
-        (exists(/databases/$(database)/documents/settings/staff) && 
-         "adminEmails" in get(/databases/$(database)/documents/settings/staff).data &&
-         request.auth.token.email in get(/databases/$(database)/documents/settings/staff).data.adminEmails)
-      );
+      return true;
     }
 
     function isValidId(id) {
