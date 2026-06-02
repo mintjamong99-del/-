@@ -1,5 +1,28 @@
 import React, { useState, useEffect } from 'react';
 import { 
+  collection, 
+  onSnapshot, 
+  doc, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query, 
+  orderBy, 
+  where, 
+  serverTimestamp 
+} from 'firebase/firestore';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { 
+  db, 
+  auth, 
+  logInWithGoogle, 
+  logOutFromFirebase, 
+  isUserAdmin, 
+  handleFirestoreError, 
+  OperationType 
+} from './firebase';
+import { 
   BookOpen, 
   Calendar, 
   MapPin, 
@@ -27,6 +50,22 @@ import {
   Clock,
   ExternalLink
 } from 'lucide-react';
+
+const parseDoc = (doc: any) => {
+  const data = doc.data();
+  const result = { ...data };
+  if (data.createdAt && typeof data.createdAt.toDate === 'function') {
+    const d = data.createdAt.toDate();
+    result.createdAt = d.toISOString().replace('T', ' ').substring(0, 16);
+  } else if (!data.createdAt) {
+    result.createdAt = new Date().toISOString().replace('T', ' ').substring(0, 16);
+  }
+  if (data.updatedAt && typeof data.updatedAt.toDate === 'function') {
+    const d = data.updatedAt.toDate();
+    result.updatedAt = d.toISOString().replace('T', ' ').substring(0, 16);
+  }
+  return result;
+};
 
 // === TYPE DEFINITIONS ===
 interface Sermon {
@@ -97,6 +136,100 @@ interface GalleryItem {
   date: string;
 }
 
+// Helper to compress general images to fit Firestore constraints (under 1MB) and boost speed
+const compressImage = (file: File, maxWidth = 800, maxHeight = 800, quality = 0.7): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width = Math.round((width * maxHeight) / height);
+            height = maxHeight;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(event.target?.result as string); // Fallback to raw base64 if canvas is unsupported
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(dataUrl);
+      };
+      img.onerror = () => {
+        resolve(event.target?.result as string); // Fallback to raw base64 on error
+      };
+    };
+    reader.onerror = () => {
+      reject(new Error('파일을 읽어들이는 과정에 오류가 발생했습니다.'));
+    };
+  });
+};
+
+// Helper for 1:1 squared photo crop and compress to fit avatar layout
+const compressAndCropToSquare = (file: File, size = 400, quality = 0.7): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(event.target?.result as string); // Fallback
+          return;
+        }
+
+        let sx = 0;
+        let sy = 0;
+        let sWidth = img.width;
+        let sHeight = img.height;
+
+        if (img.width > img.height) {
+          sWidth = img.height;
+          sx = (img.width - img.height) / 2;
+        } else if (img.height > img.width) {
+          sHeight = img.width;
+          sy = (img.height - img.width) / 2;
+        }
+
+        ctx.drawImage(img, sx, sy, sWidth, sHeight, 0, 0, size, size);
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(dataUrl);
+      };
+      img.onerror = () => {
+        resolve(event.target?.result as string); // Fallback
+      };
+    };
+    reader.onerror = () => {
+      reject(new Error('파일을 읽어들이는 과정에 오류가 발생했습니다.'));
+    };
+  });
+};
+
 // === MAIN APP ===
 export default function App() {
   // Navigation & View States
@@ -104,6 +237,14 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+  const [isGoogleAdminUser, setIsGoogleAdminUser] = useState<boolean>(false);
+  const [adminEmails, setAdminEmails] = useState<string[]>([
+    'mintjamong99@gmail.com',
+    'seminary1991@gmail.com'
+  ]);
+  const [newAdminEmail, setNewAdminEmail] = useState('');
   const [adminLoginError, setAdminLoginError] = useState('');
   const [missionTab, setMissionTab] = useState<'all' | 'missionary' | 'pastor' | 'support'>('all');
 
@@ -145,6 +286,8 @@ export default function App() {
   const [newEvent, setNewEvent] = useState<Omit<EventSchedule, 'id'>>({ title: '', date: '', time: '', location: '', desc: '' });
   const [editingNotice, setEditingNotice] = useState<Notice | null>(null);
   const [editingEvent, setEditingEvent] = useState<EventSchedule | null>(null);
+  const [editingRegistration, setEditingRegistration] = useState<NewcomerRegistration | null>(null);
+  const [editingPrayer, setEditingPrayer] = useState<PrayerRequest | null>(null);
   
   // Inline CMS states for Worship & Word Sidebar
   const [isEditingInline, setIsEditingInline] = useState(false);
@@ -160,191 +303,50 @@ export default function App() {
   const [pdfUploadError, setPdfUploadError] = useState('');
   const [pdfViewTab, setPdfViewTab] = useState<'pdf' | 'text'>('pdf');
 
-  // Initialize Sample Data
+  // Subscribe to Firebase Authentication state
   useEffect(() => {
-    const savedSermons = localStorage.getItem('sm_sermons');
-    const savedNotices = localStorage.getItem('sm_notices');
-    const savedEvents = localStorage.getItem('sm_events');
-    const savedRegs = localStorage.getItem('sm_registrations');
-    const savedPrayers = localStorage.getItem('sm_prayers');
-
-    const defaultSermons: Sermon[] = [
-      {
-        id: '1',
-        title: '내게 주신 은혜를 따라',
-        preacher: '이인영 담임목사',
-        date: '2026-05-31',
-        youtubeId: '8KK022vRSh8', // 5월 31일 주일설교 (연동 완료)
-        scripture: '고린도전서 15:10'
-      },
-      {
-        id: '2',
-        title: '매일매일 성령 충만한 건강한 삶',
-        preacher: '이인영 담임목사',
-        date: '2026-05-24',
-        youtubeId: 'W_o13651_4k', // 5월 24일 주일설교 (이미지 주보 정보 완벽 매칭!)
-        scripture: '에베소서 5:15-21'
-      },
-      {
-        id: '3',
-        title: '말씀 위에 든든히 서가는 믿음의 공동체',
-        preacher: '이인영 담임목사',
-        date: '2026-05-17',
-        youtubeId: 'bO1D19U26lA', // 5월 17일 주일설교
-        scripture: '사도행전 20:32'
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setIsAuthLoading(false);
+      if (firebaseUser) {
+        const email = firebaseUser.email || '';
+        const isEmailAdmin = isUserAdmin(email) || adminEmails.map(e => e.toLowerCase()).includes(email.toLowerCase());
+        if (isEmailAdmin) {
+          setIsAdminAuthenticated(true);
+          setIsGoogleAdminUser(true);
+        } else {
+          setIsGoogleAdminUser(false);
+        }
+      } else {
+        setIsGoogleAdminUser(false);
       }
+    });
+    return () => unsubscribe();
+  }, [adminEmails]);
+
+  // Sync state data in real-time with Firestore
+  useEffect(() => {
+    // 1. Initial default datasets for seamless bootstrapping
+    const defaultSermons: Sermon[] = [
+      { id: '1', title: '내게 주신 은혜를 따라', preacher: '이인영 담임목사', date: '2026-05-31', youtubeId: '8KK022vRSh8', scripture: '고린도전서 15:10' },
+      { id: '2', title: '매일매일 성령 충만한 건강한 삶', preacher: '이인영 담임목사', date: '2026-05-24', youtubeId: 'W_o13651_4k', scripture: '에베소서 5:15-21' },
+      { id: '3', title: '말씀 위에 든든히 서가는 믿음의 공동체', preacher: '이인영 담임목사', date: '2026-05-17', youtubeId: 'bO1D19U26lA', scripture: '사도행전 20:32' }
     ];
 
     const defaultNotices: Notice[] = [
-      {
-        id: '1',
-        category: '공지',
-        title: '2026년 여름 전교생 성경학교 교사 모집 안내',
-        date: '2026-05-28',
-        content: '올해 여름 다음세대(유치부, 유년부, 청소년부)의 신앙 성장을 위한 뜨거운 영적 가르침을 선사할 믿음의 교사분들을 모십니다. 많은 사명자들의 지원 바랍니다.',
-        author: '교육부 일동'
-      },
-      {
-        id: '2',
-        category: '주보',
-        title: '2026년 5월 24일자 공식 주간 주보 안내',
-        date: '2026-05-24',
-        content: '창립 1991년 11월 17일, 제36권 18호 스마랑 한인교회 주보가 발행되었습니다.\n\n[예배 순서 및 은혜의 말씀]\n- 은혜의 찬양과 함께 성령 충만한 예배의 자리로 성도님들을 초청합니다.\n- 예배의 부름: 오늘 이곳에 계신 성령님\n- 기도: 노현숙 권사\n- 말씀선포: 이인영 담임목사 (에베소서 5:15-21)\n- 수요예배: 수요 오전 10시 30분\n- 금요 찬양기도회: 금요일 저녁 7시 30분',
-        author: '행정실'
-      },
-      {
-        id: '3',
-        category: '소식',
-        title: '인도네시아 반둥안 산 지대 전교인 야외 단합대회 및 기도회',
-        date: '2026-05-20',
-        content: '성도간의 깊은 조율과 하늘이 주신 자연 속에서 연합을 꾀하기 위해, 다가오는 6월 15일에 반둥안 일원으로 수련회 및 야외 소모임 단합대회를 기획하고 있으니 함께해주시기 바랍니다.',
-        author: '기획위원회'
-      },
-      {
-        id: '4',
-        category: '행사',
-        title: '새가족 특별 성경공부 개강 안내',
-        date: '2026-05-15',
-        content: '인도네시아 스마랑에 처음 이주하시어 신앙생활을 시작하시는 새가족 분들을 일대일 매칭하여 신앙의 중심과 말씀의 풍족함을 나눌 성경공부 아카데미가 개설됩니다. 등록처에 신청해주세요.',
-        author: '양육부'
-      },
-      {
-        id: '5',
-        category: '공지',
-        title: '스마랑 지역 사회 선교 봉사 및 한인 구제 사역',
-        date: '2026-05-08',
-        content: '지역 사회에 어려움을 겪고 계시는 주민들을 돕기 위한 여름 특별 구제 봉사가 예정되어 있습니다. 자원하여 섬겨주실 청년 및 성도분들은 WhatsApp으로 신청 바랍니다.',
-        author: '국내선교부'
-      }
+      { id: '1', category: '공지', title: '2026년 여름 전교생 성경학교 교사 모집 안내', date: '2026-05-28', content: '올해 여름 다음세대(유치부, 유년부, 청소년부)의 신앙 성장을 위한 뜨거운 영적 가르침을 선사할 믿음의 교사분들을 모십니다. 많은 사명자들의 지원 바랍니다.', author: '교육부 일동' },
+      { id: '2', category: '주보', title: '2026년 5월 24일자 공식 주간 주보 안내', date: '2026-05-24', content: '창립 1991년 11월 17일, 제36권 18호 스마랑 한인교회 주보가 발행되었습니다.\n\n[예배 순서 및 은혜의 말씀]\n- 은혜의 찬양과 함께 성령 충만한 예배의 자리로 성도님들을 초청합니다.\n- 예배의 부름: 오늘 이곳에 계신 성령님\n- 기도: 노현숙 권사\n- 말씀선포: 이인영 담임목사 (에베소서 5:15-21)\n- 수요예배: 수요 오전 10시 30분\n- 금요 찬양기도회: 금요일 저녁 7시 30분', author: '행정실' },
+      { id: '3', category: '소식', title: '인도네시아 반둥안 산 지대 전교인 야외 단합대회 및 기도회', date: '2026-05-20', content: '성도간의 깊은 조율과 하늘이 주신 자연 속에서 연합을 꾀하기 위해, 다가오는 6월 15일에 반둥안 일원으로 수련회 및 야외 소모임 단합대회를 기획하고 있으니 함께해주시기 바랍니다.', author: '기획위원회' },
+      { id: '4', category: '행사', title: '새가족 특별 성경공부 개강 안내', date: '2026-05-15', content: '인도네시아 스마랑에 처음 이주하시어 신앙생활을 시작하시는 새가족 분들을 일대일 매칭하여 신앙의 중심과 말씀의 풍족함을 나눌 성경공부 아카데미가 개설됩니다. 등록처에 신청해주세요.', author: '양육부' },
+      { id: '5', category: '공지', title: '스마랑 지역 사회 선교 봉사 및 한인 구제 사역', date: '2026-05-08', content: '지역 사회에 어려움을 겪고 계시는 주민들을 돕기 위한 여름 특별 구제 봉사가 예정되어 있습니다. 자원하여 섬겨주실 청년 및 성도분들은 WhatsApp으로 신청 바랍니다.', author: '국내선교부' }
     ];
 
     const defaultEvents: EventSchedule[] = [
-      {
-        id: '1',
-        title: '전교인 반둥안 단합 기도회',
-        date: '2026-06-15',
-        time: '오전 09:00',
-        location: '반둥안 리조트 야외 세미나실',
-        desc: '풍경 좋은 반둥안 산정상 지대에서 함께 드리는 예배와 뜨거운 통성 교제'
-      },
-      {
-        id: '2',
-        title: '정기 양육 및 제자 훈련 아카데미',
-        date: '2026-06-08',
-        time: '오후 02:00',
-        location: '교회 소예배실 2층',
-        desc: '이인영 목사님 주재로 이루어지는 기독교 기초 교리 복습 및 나눔'
-      },
-      {
-        id: '3',
-        title: '수요 예배 및 심야 성령 대망 희망 기도',
-        date: '2026-06-03',
-        time: '오전 10:30 & 오후 08:00',
-        location: '대예배실 본당',
-        desc: '뜨거운 말씀과 가정의 평안, 인도네시아 복음화를 위한 합심 기도회'
-      }
+      { id: '1', title: '전교인 반둥안 단합 기도회', date: '2026-06-15', time: '오전 09:00', location: '반둥안 리조트 야외 세미나실', desc: '풍경 좋은 반둥안 산정상 지대에서 함께 드리는 예배와 뜨거운 통성 교제' },
+      { id: '2', title: '정기 양육 및 제자 훈련 아카데미', date: '2026-06-08', time: '오후 02:00', location: '교회 소예배실 2층', desc: '이인영 목사님 주재로 이루어지는 기독교 기초 교리 복습 및 나눔' },
+      { id: '3', title: '수요 예배 및 심야 성령 대망 희망 기도', date: '2026-06-03', time: '오전 10:30 & 오후 08:00', location: '대예배실 본당', desc: '뜨거운 말씀과 가정의 평안, 인도네시아 복음화를 위한 합심 기도회' }
     ];
 
-    const defaultRegistrations: NewcomerRegistration[] = [
-      {
-        id: 'reg-1',
-        name: '민정우',
-        phone: '+62 812-3456-7890',
-        email: 'jungwoo@gmail.com',
-        address: 'Jl. Pemuda No.45, Semarang Tengah',
-        birthDate: '1995-11-12',
-        notes: '자카르타에서 이번 달에 인도네시아 스마랑 지사로 발령받아 이사 온 청년입니다. 교제와 예배 말씀 위에 견고해지고 싶습니다.',
-        createdAt: '2026-05-29 14:20',
-        status: '완료'
-      },
-      {
-        id: 'reg-2',
-        name: '이하은',
-        phone: '+62 821-9988-7766',
-        email: 'haeun99@naver.com',
-        address: 'Jl. Sultan Agung Apartment Green Hills Room 802',
-        birthDate: '1998-04-05',
-        notes: '스마랑에서 대학 연구원으로 1년 거주 예정입니다. 주일 2부 대예배 참석하고 교제 나누고 싶어요!',
-        createdAt: '2026-05-30 09:12',
-        status: '대기'
-      }
-    ];
-
-    const defaultPrayers: PrayerRequest[] = [
-      {
-        id: 'pr-1',
-        name: '김은자 집사',
-        content: '인도네시아 스마랑 한인교회의 모든 가정과 자녀들의 말씀 위 든든한 정착을 소망합니다. 주눅 들지 않는 신앙 갖게 해주소서.',
-        createdAt: '2026-05-29 18:00',
-        isPrivate: false
-      },
-      {
-        id: 'pr-2',
-        name: '이인식 성도',
-        content: '어머님 병환 차출 및 한국 치료 귀국 여정인데 성령의 인도와 치유가 닿기를 간절히 바라마지 않습니다.',
-        createdAt: '2026-05-31 10:45',
-        isPrivate: false
-      }
-    ];
-
-    if (savedSermons) {
-      const parsed = JSON.parse(savedSermons).filter((s: Sermon) => s.id !== '4' && s.id !== '5');
-      if (!parsed.some((s: Sermon) => s.youtubeId === '8KK022vRSh8') || parsed.length > 3) {
-        setSermons(defaultSermons);
-        localStorage.setItem('sm_sermons', JSON.stringify(defaultSermons));
-      } else {
-        setSermons(parsed);
-      }
-    } else {
-      setSermons(defaultSermons);
-      localStorage.setItem('sm_sermons', JSON.stringify(defaultSermons));
-    }
-
-    if (savedNotices) setNotices(JSON.parse(savedNotices));
-    else {
-      setNotices(defaultNotices);
-      localStorage.setItem('sm_notices', JSON.stringify(defaultNotices));
-    }
-
-    if (savedEvents) setEvents(JSON.parse(savedEvents));
-    else {
-      setEvents(defaultEvents);
-      localStorage.setItem('sm_events', JSON.stringify(defaultEvents));
-    }
-
-    if (savedRegs) setRegistrations(JSON.parse(savedRegs));
-    else {
-      setRegistrations(defaultRegistrations);
-      localStorage.setItem('sm_registrations', JSON.stringify(defaultRegistrations));
-    }
-
-    if (savedPrayers) setPrayers(JSON.parse(savedPrayers));
-    else {
-      setPrayers(defaultPrayers);
-      localStorage.setItem('sm_prayers', JSON.stringify(defaultPrayers));
-    }
-
-    const savedBulletins = localStorage.getItem('sm_pdf_bulletins');
     const defaultBulletins: Bulletin[] = [
       {
         id: 'b-default-1',
@@ -370,142 +372,514 @@ export default function App() {
       }
     ];
 
-    if (savedBulletins) {
-      const parsed = JSON.parse(savedBulletins);
-      setBulletins(parsed);
-      if (parsed.length > 0) {
-        setSelectedBulletin(parsed[0]);
-      }
-    } else {
-      setBulletins(defaultBulletins);
-      setSelectedBulletin(defaultBulletins[0]);
-      localStorage.setItem('sm_pdf_bulletins', JSON.stringify(defaultBulletins));
-    }
-
-    const savedGallery = localStorage.getItem('sm_gallery');
     const defaultGallery: GalleryItem[] = [
-      {
-        id: 'g-3',
-        title: '스마랑 빈민지구 구제 봉사',
-        description: '선한 영향력으로 주 예수의 몸을 실천한 현지 빵 나눔 활동의 은혜.',
-        bgClass: 'bg-gray-150 text-gray-700',
-        date: '2026-05-08'
-      }
+      { id: 'g-3', title: '스마랑 빈민지구 구제 봉사', description: '선한 영향력으로 주 예수의 몸을 실천한 현지 빵 나눔 활동의 은혜.', bgClass: 'bg-gray-150 text-gray-700', date: '2026-05-08' }
     ];
 
-    if (savedGallery) {
-      const parsed = JSON.parse(savedGallery) as GalleryItem[];
-      const filtered = parsed.filter(item => item.id !== 'g-1' && item.id !== 'g-2');
-      setGalleryItems(filtered);
-      localStorage.setItem('sm_gallery', JSON.stringify(filtered));
-    } else {
-      setGalleryItems(defaultGallery);
-      localStorage.setItem('sm_gallery', JSON.stringify(defaultGallery));
-    }
+    const defaultPrayers: PrayerRequest[] = [
+      { id: 'pr-1', name: '김은자 집사', content: '인도네시아 스마랑 한인교회의 모든 가정과 자녀들의 말씀 위 든든한 정착을 소망합니다. 주눅 들지 않는 신앙 갖게 해주소서.', createdAt: '2026-05-29 18:00', isPrivate: false },
+      { id: 'pr-2', name: '이인식 성도', content: '어머님 병환 차출 및 한국 치료 귀국 여정인데 성령의 인도와 치유가 닿기를 간절히 바라마지 않습니다.', createdAt: '2026-05-31 10:45', isPrivate: false }
+    ];
 
-    const savedPastor = localStorage.getItem('sm_staff_pastor');
-    if (savedPastor) setHeadPastor(savedPastor);
-    const savedEvang = localStorage.getItem('sm_staff_evang');
-    if (savedEvang) setEvangelists(savedEvang);
-    const savedElders = localStorage.getItem('sm_staff_elders');
-    if (savedElders) setElders(savedElders);
-    const savedMissionElders = localStorage.getItem('sm_staff_mission_elders');
-    if (savedMissionElders) setMissionElders(savedMissionElders);
-    const savedPastorImage = localStorage.getItem('sm_pastor_image');
-    if (savedPastorImage) setPastorImage(savedPastorImage);
-  }, []);
+    // 2. Attach Snapshots for Sermons
+    const sermonsQuery = query(collection(db, 'sermons'), orderBy('date', 'desc'));
+    const unsubscribeSermons = onSnapshot(sermonsQuery, (snapshot) => {
+      if (snapshot.empty && isAdminAuthenticated) {
+        defaultSermons.forEach(async (s) => {
+          try {
+            await setDoc(doc(db, 'sermons', s.id), {
+              id: s.id,
+              title: s.title,
+              preacher: s.preacher,
+              scripture: s.scripture,
+              date: s.date,
+              youtubeId: s.youtubeId,
+              createdAt: serverTimestamp()
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      } else if (!snapshot.empty) {
+        const items = snapshot.docs.map(parseDoc) as Sermon[];
+        setSermons(items);
+      } else {
+        setSermons(defaultSermons);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'sermons');
+    });
+
+    // 3. Attach Snapshots for Notices
+    const noticesQuery = query(collection(db, 'notices'), orderBy('date', 'desc'));
+    const unsubscribeNotices = onSnapshot(noticesQuery, (snapshot) => {
+      if (snapshot.empty && isAdminAuthenticated) {
+        defaultNotices.forEach(async (n) => {
+          try {
+            await setDoc(doc(db, 'notices', n.id), {
+              id: n.id,
+              category: n.category,
+              title: n.title,
+              content: n.content,
+              date: n.date,
+              author: n.author,
+              views: 0,
+              createdAt: serverTimestamp()
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      } else if (!snapshot.empty) {
+        const items = snapshot.docs.map(parseDoc) as Notice[];
+        setNotices(items);
+      } else {
+        setNotices(defaultNotices);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'notices');
+    });
+
+    // 4. Attach Snapshots for Events
+    const eventsQuery = query(collection(db, 'events'), orderBy('date', 'desc'));
+    const unsubscribeEvents = onSnapshot(eventsQuery, (snapshot) => {
+      if (snapshot.empty && isAdminAuthenticated) {
+        defaultEvents.forEach(async (ev) => {
+          try {
+            await setDoc(doc(db, 'events', ev.id), {
+              id: ev.id,
+              title: ev.title,
+              date: ev.date,
+              time: ev.time,
+              loc: ev.location,
+              desc: ev.desc || '',
+              createdAt: serverTimestamp()
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      } else if (!snapshot.empty) {
+        const items = snapshot.docs.map(d => {
+          const parsed = parseDoc(d);
+          return {
+            id: parsed.id,
+            title: parsed.title,
+            date: parsed.date,
+            time: parsed.time,
+            location: parsed.loc,
+            desc: parsed.desc
+          };
+        }) as EventSchedule[];
+        setEvents(items);
+      } else {
+        setEvents(defaultEvents);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'events');
+    });
+
+    // 5. Attach Snapshots for Bulletins
+    const bulletinsQuery = query(collection(db, 'pdf_bulletins'), orderBy('date', 'desc'));
+    const unsubscribeBulletins = onSnapshot(bulletinsQuery, (snapshot) => {
+      if (snapshot.empty && isAdminAuthenticated) {
+        defaultBulletins.forEach(async (b) => {
+          try {
+            await setDoc(doc(db, 'pdf_bulletins', b.id), {
+              id: b.id,
+              title: b.title,
+              date: b.date,
+              pdfUrl: b.pdfUrl,
+              views: 0,
+              createdAt: serverTimestamp()
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      } else if (!snapshot.empty) {
+        const items = snapshot.docs.map(parseDoc) as Bulletin[];
+        setBulletins(items);
+        if (!selectedBulletin) {
+          setSelectedBulletin(items[0]);
+        }
+      } else {
+        setBulletins(defaultBulletins);
+        setSelectedBulletin(defaultBulletins[0]);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'pdf_bulletins');
+    });
+
+    // 6. Attach Snapshots for Gallery
+    const galleryQuery = query(collection(db, 'gallery'), orderBy('date', 'desc'));
+    const unsubscribeGallery = onSnapshot(galleryQuery, (snapshot) => {
+      if (snapshot.empty && isAdminAuthenticated) {
+        defaultGallery.forEach(async (g) => {
+          try {
+            await setDoc(doc(db, 'gallery', g.id), {
+              id: g.id,
+              title: g.title,
+              date: g.date,
+              imageUrl: g.imageUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2',
+              remarks: g.description || '',
+              createdAt: serverTimestamp()
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      } else if (!snapshot.empty) {
+        const items = snapshot.docs.map(d => {
+          const parsed = parseDoc(d);
+          return {
+            id: parsed.id,
+            title: parsed.title,
+            date: parsed.date,
+            imageUrl: parsed.imageUrl,
+            description: parsed.remarks || parsed.description || ''
+          };
+        }) as GalleryItem[];
+        setGalleryItems(items);
+      } else {
+        setGalleryItems(defaultGallery);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'gallery');
+    });
+
+    // 7. Attach Snapshots for settings/staff
+    const unsubscribeSettings = onSnapshot(doc(db, 'settings', 'staff'), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        if (data.headPastor) setHeadPastor(data.headPastor);
+        if (data.evangelists) setEvangelists(data.evangelists);
+        if (data.elders) setElders(data.elders);
+        if (data.missionElders) setMissionElders(data.missionElders);
+        if (data.pastorImage) setPastorImage(data.pastorImage);
+        
+        let loadedEmails = ['mintjamong99@gmail.com', 'seminary1991@gmail.com'];
+        if (data.adminEmails && Array.isArray(data.adminEmails)) {
+          setAdminEmails(data.adminEmails);
+          loadedEmails = data.adminEmails;
+        }
+        
+        const currentUser = auth.currentUser;
+        if (currentUser) {
+          const email = currentUser.email || '';
+          const isEmailAdmin = isUserAdmin(email) || loadedEmails.map(e => e.toLowerCase()).includes(email.toLowerCase());
+          if (isEmailAdmin) {
+            setIsAdminAuthenticated(true);
+            setIsGoogleAdminUser(true);
+          } else {
+            setIsGoogleAdminUser(false);
+          }
+        }
+      } else if (isAdminAuthenticated) {
+        setDoc(doc(db, 'settings', 'staff'), {
+          id: 'staff',
+          headPastor: '이인영',
+          evangelists: '이미정 • 서보희',
+          elders: '이선우 • 임종학 • 최석원',
+          missionElders: '장인석 • 유성천',
+          pastorImage: 'https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?auto=format&fit=crop&q=80&w=256&h=256',
+          adminEmails: ['mintjamong99@gmail.com', 'seminary1991@gmail.com'],
+          updatedAt: serverTimestamp()
+        }).catch(console.error);
+      }
+    }, (err) => {
+      // settings read failure is benign, fall back to defaults silently
+      console.warn("Settings fetch failed or unauthorized:", err);
+    });
+
+    // 8. Attach Snapshots for Prayers
+    const prayersQuery = query(collection(db, 'prayers'), orderBy('createdAt', 'desc'));
+    const unsubscribePrayers = onSnapshot(prayersQuery, (snapshot) => {
+      if (snapshot.empty && isAdminAuthenticated) {
+        defaultPrayers.forEach(async (pr) => {
+          try {
+            await setDoc(doc(db, 'prayers', pr.id), {
+              id: pr.id,
+              title: '중보기도 제목',
+              author: pr.name,
+              content: pr.content,
+              date: new Date().toISOString().slice(0, 10),
+              isPrivate: pr.isPrivate || false,
+              praises: 0,
+              createdAt: serverTimestamp()
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      } else if (!snapshot.empty) {
+        const items = snapshot.docs.map(d => {
+          const parsed = parseDoc(d);
+          return {
+            id: parsed.id,
+            name: parsed.author,
+            content: parsed.content,
+            createdAt: parsed.createdAt,
+            isPrivate: parsed.isPrivate || false
+          };
+        }) as PrayerRequest[];
+        // Filter private items client-side securely if not admin
+        if (isAdminAuthenticated) {
+          setPrayers(items);
+        } else {
+          setPrayers(items.filter(p => !p.isPrivate));
+        }
+      } else {
+        setPrayers(defaultPrayers);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'prayers');
+    });
+
+    return () => {
+      unsubscribeSermons();
+      unsubscribeNotices();
+      unsubscribeEvents();
+      unsubscribeBulletins();
+      unsubscribeGallery();
+      unsubscribeSettings();
+      unsubscribePrayers();
+    };
+  }, [isAdminAuthenticated]);
+
+  // Sync Registrations in real-time only if Admin is authenticated (Secure Attribute Check)
+  useEffect(() => {
+    if (!isAdminAuthenticated) return;
+
+    const defaultRegistrations: NewcomerRegistration[] = [
+      { id: 'reg-1', name: '민정우', phone: '+62 812-3456-7890', email: 'jungwoo@gmail.com', address: 'Jl. Pemuda No.45, Semarang Tengah', birthDate: '1995-11-12', notes: '자카르타에서 이번 달에 인도네시아 스마랑 지사로 발령받아 이사 온 청년입니다. 교제와 예배 말씀 위에 견고해지고 싶습니다.', createdAt: '2026-05-29 14:20', status: '완료' },
+      { id: 'reg-2', name: '이하은', phone: '+62 821-9988-7766', email: 'haeun99@naver.com', address: 'Jl. Sultan Agung Apartment Green Hills Room 802', birthDate: '1998-04-05', notes: '스마랑에서 대학 연구원으로 1년 거주 예정입니다. 주일 2부 대예배 참석하고 교제 나누고 싶어요!', createdAt: '2026-05-30 09:12', status: '대기' }
+    ];
+
+    const registrationsQuery = query(collection(db, 'registrations'), orderBy('createdAt', 'desc'));
+    const unsubscribeRegs = onSnapshot(registrationsQuery, (snapshot) => {
+      if (snapshot.empty) {
+        defaultRegistrations.forEach(async (r) => {
+          try {
+            await setDoc(doc(db, 'registrations', r.id), {
+              id: r.id,
+              name: r.name,
+              phone: r.phone,
+              dept: '새가족부',
+              remark: r.notes || '',
+              date: r.createdAt.substring(0, 10),
+              createdAt: serverTimestamp()
+            });
+          } catch (e) {
+            console.error(e);
+          }
+        });
+      } else {
+        const items = snapshot.docs.map(d => {
+          const parsed = parseDoc(d);
+          return {
+            id: parsed.id,
+            name: parsed.name,
+            phone: parsed.phone,
+            email: parsed.email || '',
+            address: parsed.address || '',
+            birthDate: parsed.birthDate || '',
+            notes: parsed.remark || '',
+            createdAt: parsed.createdAt,
+            status: parsed.status || '대기'
+          };
+        }) as NewcomerRegistration[];
+        setRegistrations(items);
+      }
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'registrations');
+    });
+
+    return () => unsubscribeRegs();
+  }, [isAdminAuthenticated]);
 
   const handleAdminLogin = (e: React.FormEvent) => {
     e.preventDefault();
     if (adminPassword === 'semarang1991' || adminPassword === '1234') {
       setIsAdminAuthenticated(true);
+      setIsGoogleAdminUser(false);
       setAdminLoginError('');
     } else {
       setAdminLoginError('올바른 비밀번호를 입력해 주세요. (가이드: semarang1991)');
     }
   };
 
+  const handleAdminLogout = async () => {
+    try {
+      await logOutFromFirebase();
+    } catch (e) {
+      console.error(e);
+    }
+    setIsAdminAuthenticated(false);
+    setIsGoogleAdminUser(false);
+  };
+
+  const checkMutationPermission = (): boolean => {
+    if (!isAdminAuthenticated) {
+      alert('관리자 권한을 위한 로그인이 되어 있지 않습니다.');
+      return false;
+    }
+    if (!isGoogleAdminUser) {
+      alert('⚠️ 수정/삭제 권한이 없습니다.\n\n정정과 삭제는 등록된 Google 시스템 관리자만 가능합니다. "Google 관리자 계정으로 로그인"을 해주십시오. (현재 일반 조회 모드로 보기만 가능합니다.)');
+      return false;
+    }
+    return true;
+  };
+
+  const handleAddAdminEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!checkMutationPermission()) return;
+    
+    const emailToRegister = newAdminEmail.trim().toLowerCase();
+    if (!emailToRegister) return;
+    
+    if (!emailToRegister.includes('@')) {
+      alert('올바른 이메일 형식이 아닙니다.');
+      return;
+    }
+    
+    if (adminEmails.map(email => email.toLowerCase()).includes(emailToRegister)) {
+      alert('이미 관리자로 등록되어 있는 이메일입니다.');
+      return;
+    }
+    
+    if (adminEmails.length >= 5) {
+      alert('관리자는 최대 5명까지만 설정할 수 있습니다.');
+      return;
+    }
+    
+    const updatedEmails = [...adminEmails, emailToRegister];
+    
+    try {
+      await setDoc(doc(db, 'settings', 'staff'), {
+        adminEmails: updatedEmails
+      }, { merge: true });
+      setAdminEmails(updatedEmails);
+      setNewAdminEmail('');
+      alert(`[${emailToRegister}] 계정이 관리자로 등록되었습니다. 이제 Firestore 규칙을 활용해 정정 및 삭제를 실시간 권한 동기화할 수 있습니다.`);
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'settings/staff');
+    }
+  };
+
+  const handleRemoveAdminEmail = async (emailToRemove: string) => {
+    if (!checkMutationPermission()) return;
+    
+    const lowerRemove = emailToRemove.toLowerCase();
+    if (lowerRemove === 'mintjamong99@gmail.com') {
+      alert('시스템 소유자(mintjamong99@gmail.com) 계정은 권한 삭제할 수 없습니다.');
+      return;
+    }
+    
+    if (!confirm(`[${emailToRemove}] 계정을 관리자 목록에서 삭제하시겠습니까?`)) {
+      return;
+    }
+    
+    const updatedEmails = adminEmails.filter(email => email.toLowerCase() !== lowerRemove);
+    try {
+      await setDoc(doc(db, 'settings', 'staff'), {
+        adminEmails: updatedEmails
+      }, { merge: true });
+      setAdminEmails(updatedEmails);
+      alert('관리자 계정이 목록에서 제거되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'settings/staff');
+    }
+  };
+
   // Submit Register Form
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!regForm.name || !regForm.phone) {
       alert('이름과 연락처는 필수 기입 사항입니다.');
       return;
     }
-    const newReg: NewcomerRegistration = {
-      id: 'reg-' + Date.now(),
-      name: regForm.name,
-      phone: regForm.phone,
-      email: regForm.email,
-      address: regForm.address,
-      birthDate: regForm.birthDate,
-      notes: regForm.notes,
-      createdAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
-      status: '대기'
-    };
-    const updated = [newReg, ...registrations];
-    setRegistrations(updated);
-    localStorage.setItem('sm_registrations', JSON.stringify(updated));
-    setShowRegSuccess(true);
-    setRegForm({ name: '', phone: '', email: '', address: '', birthDate: '', notes: '' });
+    try {
+      const docId = 'reg-' + Date.now();
+      await setDoc(doc(db, 'registrations', docId), {
+        id: docId,
+        name: regForm.name,
+        phone: regForm.phone,
+        email: regForm.email || '',
+        address: regForm.address || '',
+        birthDate: regForm.birthDate || '',
+        remark: regForm.notes || '',
+        dept: '새가족부',
+        status: '대기',
+        createdAt: serverTimestamp()
+      });
+      setShowRegSuccess(true);
+      setRegForm({ name: '', phone: '', email: '', address: '', birthDate: '', notes: '' });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'registrations');
+    }
   };
 
   // Submit Prayer Request
-  const handlePrayerSubmit = (e: React.FormEvent) => {
+  const handlePrayerSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prayerForm.content) {
       alert('기도 요청 내용을 작성해 주세요.');
       return;
     }
-    const newPr: PrayerRequest = {
-      id: 'pr-' + Date.now(),
-      name: prayerForm.name || '무명 청원자',
-      content: prayerForm.content,
-      createdAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
-      isPrivate: prayerForm.isPrivate
-    };
-    const updated = [newPr, ...prayers];
-    setPrayers(updated);
-    localStorage.setItem('sm_prayers', JSON.stringify(updated));
-    setShowPrayerSuccess(true);
-    setPrayerForm({ name: '', content: '', isPrivate: false });
+    try {
+      const docId = 'pr-' + Date.now();
+      await setDoc(doc(db, 'prayers', docId), {
+        id: docId,
+        title: '중보기도 제목',
+        author: prayerForm.name || '무명 청원자',
+        content: prayerForm.content,
+        date: new Date().toISOString().slice(0, 10),
+        isPrivate: prayerForm.isPrivate,
+        praises: 0,
+        createdAt: serverTimestamp()
+      });
+      setShowPrayerSuccess(true);
+      setPrayerForm({ name: '', content: '', isPrivate: false });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'prayers');
+    }
   };
 
   // Admin Actions
-  const handleAddSermon = (e: React.FormEvent) => {
+  const handleAddSermon = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdminAuthenticated) {
-      alert('관리자 권한이 없습니다. 먼저 로그인해 주세요.');
-      return;
-    }
+    if (!checkMutationPermission()) return;
     if (!newSermon.title || !newSermon.youtubeId) {
       alert('설교 제목과 유튜브 비디오 ID는 필수 항목입니다.');
       return;
     }
-    const sItem: Sermon = {
-      id: 's-' + Date.now(),
-      title: newSermon.title,
-      preacher: newSermon.preacher,
-      scripture: newSermon.scripture || '본문 자료 없음',
-      date: newSermon.date || new Date().toISOString().slice(0, 10),
-      youtubeId: newSermon.youtubeId
-    };
-    const updated = [sItem, ...sermons];
-    setSermons(updated);
-    localStorage.setItem('sm_sermons', JSON.stringify(updated));
-    setNewSermon({ title: '', preacher: '이인영 담임목사', scripture: '', date: '', youtubeId: '' });
-    alert('새로운 설교 말씀이 홈페이지에 반영되었습니다.');
+    try {
+      const docId = 's-' + Date.now();
+      await setDoc(doc(db, 'sermons', docId), {
+        id: docId,
+        title: newSermon.title,
+        preacher: newSermon.preacher,
+        scripture: newSermon.scripture || '본문 자료 없음',
+        date: newSermon.date || new Date().toISOString().slice(0, 10),
+        youtubeId: newSermon.youtubeId,
+        createdAt: serverTimestamp()
+      });
+      setNewSermon({ title: '', preacher: '이인영 담임목사', scripture: '', date: '', youtubeId: '' });
+      alert('새로운 설교 말씀이 홈페이지에 반영되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'sermons');
+    }
   };
 
-  const handleDeleteSermon = (id: string) => {
-    if (!isAdminAuthenticated) {
-      alert('관리자 권한이 필요합니다.');
-      return;
-    }
+  const handleDeleteSermon = async (id: string) => {
+    if (!checkMutationPermission()) return;
     if (confirm('해당 설교자료를 삭제할까요?')) {
-      const updated = sermons.filter(s => s.id !== id);
-      setSermons(updated);
-      localStorage.setItem('sm_sermons', JSON.stringify(updated));
+      try {
+        await deleteDoc(doc(db, 'sermons', id));
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.DELETE, `sermons/${id}`);
+      }
     }
   };
 
@@ -535,60 +909,53 @@ export default function App() {
     setIsEditingInline(false);
   };
 
-  const handleSaveInlineEdit = (e: React.FormEvent) => {
+  const handleSaveInlineEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdminAuthenticated) {
-      alert('관리자 권한이 없습니다.');
-      return;
-    }
+    if (!checkMutationPermission()) return;
     if (!inlineSermonForm.title || !inlineSermonForm.youtubeId) {
       alert('설교 제목과 유튜브 비디오 ID는 필수 항목입니다.');
       return;
     }
-    const updated = sermons.map(s => {
-      if (s.id === inlineSermonForm.id) {
-        return {
-          ...s,
-          title: inlineSermonForm.title,
-          preacher: inlineSermonForm.preacher,
-          scripture: inlineSermonForm.scripture,
-          date: inlineSermonForm.date,
-          youtubeId: inlineSermonForm.youtubeId
-        };
-      }
-      return s;
-    });
-    setSermons(updated);
-    localStorage.setItem('sm_sermons', JSON.stringify(updated));
-    setActiveVideoId(inlineSermonForm.youtubeId);
-    setIsEditingInline(false);
-    alert('설교 말씀 수정이 저장되었습니다.');
+    try {
+      await updateDoc(doc(db, 'sermons', inlineSermonForm.id), {
+        title: inlineSermonForm.title,
+        preacher: inlineSermonForm.preacher,
+        scripture: inlineSermonForm.scripture,
+        date: inlineSermonForm.date,
+        youtubeId: inlineSermonForm.youtubeId
+      });
+      setActiveVideoId(inlineSermonForm.youtubeId);
+      setIsEditingInline(false);
+      alert('설교 말씀 수정이 저장되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `sermons/${inlineSermonForm.id}`);
+    }
   };
 
-  const handleSaveInlineAdd = (e: React.FormEvent) => {
+  const handleSaveInlineAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdminAuthenticated) {
-      alert('관리자 권한이 없습니다.');
-      return;
-    }
+    if (!checkMutationPermission()) return;
     if (!inlineSermonForm.title || !inlineSermonForm.youtubeId) {
       alert('설교 제목과 유튜브 비디오 ID는 필수 항목입니다.');
       return;
     }
-    const sItem: Sermon = {
-      id: 's-' + Date.now(),
-      title: inlineSermonForm.title,
-      preacher: inlineSermonForm.preacher,
-      scripture: inlineSermonForm.scripture || '본문 자료 없음',
-      date: inlineSermonForm.date || new Date().toISOString().slice(0, 10),
-      youtubeId: inlineSermonForm.youtubeId
-    };
-    const updated = [sItem, ...sermons];
-    setSermons(updated);
-    localStorage.setItem('sm_sermons', JSON.stringify(updated));
-    setActiveVideoId(sItem.youtubeId);
-    setIsAddingInline(false);
-    alert('새로운 설교 말씀이 연동 등록되었습니다.');
+    try {
+      const docId = 's-' + Date.now();
+      await setDoc(doc(db, 'sermons', docId), {
+        id: docId,
+        title: inlineSermonForm.title,
+        preacher: inlineSermonForm.preacher,
+        scripture: inlineSermonForm.scripture || '본문 자료 없음',
+        date: inlineSermonForm.date || new Date().toISOString().slice(0, 10),
+        youtubeId: inlineSermonForm.youtubeId,
+        createdAt: serverTimestamp()
+      });
+      setActiveVideoId(inlineSermonForm.youtubeId);
+      setIsAddingInline(false);
+      alert('새로운 설교 말씀이 연동 등록되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'sermons');
+    }
   };
 
   const handleInlineAdminAuth = (e: React.FormEvent) => {
@@ -603,166 +970,224 @@ export default function App() {
     }
   };
 
-  const handleDeleteInlineSermon = (id: string, e: React.MouseEvent) => {
+  const handleDeleteInlineSermon = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!checkMutationPermission()) return;
     if (!window.confirm('정말로 이 설교 말씀을 삭제하시겠습니까?')) {
       return;
     }
-    const updated = sermons.filter(s => s.id !== id);
-    setSermons(updated);
-    localStorage.setItem('sm_sermons', JSON.stringify(updated));
-    
-    const wasActive = sermons.find(s => s.id === id)?.youtubeId === activeVideoId;
-    if (wasActive && updated.length > 0) {
-      setActiveVideoId(updated[0].youtubeId);
+    try {
+      await deleteDoc(doc(db, 'sermons', id));
+      const wasActive = sermons.find(s => s.id === id)?.youtubeId === activeVideoId;
+      if (wasActive) {
+        const remaining = sermons.filter(s => s.id !== id);
+        if (remaining.length > 0) {
+          setActiveVideoId(remaining[0].youtubeId);
+        }
+      }
+      alert('설교 말씀이 삭제되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.DELETE, `sermons/${id}`);
     }
-    alert('설교 말씀이 삭제되었습니다.');
   };
 
-  const handleAddNotice = (e: React.FormEvent) => {
+  const handleAddNotice = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!checkMutationPermission()) return;
     if (!newNotice.title || !newNotice.content) {
       alert('제목과 상세 내용은 필수입니다.');
       return;
     }
-    const nItem: Notice = {
-      id: 'n-' + Date.now(),
-      category: newNotice.category,
-      title: newNotice.title,
-      content: newNotice.content,
-      date: newNotice.date || new Date().toISOString().slice(0, 10),
-      author: newNotice.author
-    };
-    const updated = [nItem, ...notices];
-    setNotices(updated);
-    localStorage.setItem('sm_notices', JSON.stringify(updated));
-    setNewNotice({ category: '공지', title: '', content: '', date: '', author: '사무실' });
-    alert('교회 소식이 신규 업로드되었습니다.');
+    try {
+      const docId = 'n-' + Date.now();
+      await setDoc(doc(db, 'notices', docId), {
+        id: docId,
+        category: newNotice.category,
+        title: newNotice.title,
+        content: newNotice.content,
+        date: newNotice.date || new Date().toISOString().slice(0, 10),
+        author: newNotice.author,
+        views: 0,
+        createdAt: serverTimestamp()
+      });
+      setNewNotice({ category: '공지', title: '', content: '', date: '', author: '사무실' });
+      alert('교회 소식이 신규 업로드되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'notices');
+    }
   };
 
-  const handleDeleteNotice = (id: string) => {
+  const handleDeleteNotice = async (id: string) => {
+    if (!checkMutationPermission()) return;
     if (confirm('해당 알림글을 제거하겠습니까?')) {
-      const updated = notices.filter(n => n.id !== id);
-      setNotices(updated);
-      localStorage.setItem('sm_notices', JSON.stringify(updated));
-      if (editingNotice?.id === id) {
-        setEditingNotice(null);
+      try {
+        await deleteDoc(doc(db, 'notices', id));
+        if (editingNotice?.id === id) {
+          setEditingNotice(null);
+        }
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.DELETE, `notices/${id}`);
       }
     }
   };
 
-  const handleSaveNoticeEdit = (e: React.FormEvent) => {
+  const handleSaveNoticeEdit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!checkMutationPermission()) return;
     if (!editingNotice) return;
     if (!editingNotice.title || !editingNotice.content) {
       alert('제목과 상세 내용은 필수입니다.');
       return;
     }
-    const updated = notices.map(n => n.id === editingNotice.id ? editingNotice : n);
-    setNotices(updated);
-    localStorage.setItem('sm_notices', JSON.stringify(updated));
-    setEditingNotice(null);
-    alert('교회 소식 내용이 정확하게 정정되었습니다.');
+    try {
+      await updateDoc(doc(db, 'notices', editingNotice.id), {
+        category: editingNotice.category,
+        title: editingNotice.title,
+        content: editingNotice.content,
+        date: editingNotice.date,
+        author: editingNotice.author
+      });
+      setEditingNotice(null);
+      alert('교회 소식 내용이 정확하게 정정되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `notices/${editingNotice.id}`);
+    }
   };
 
   const handleUploadBulletin = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!checkMutationPermission()) return;
     if (!newBulletin.title) {
       alert('주보 제목 및 일자를 정확하게 작명해 주십시오.');
       return;
     }
 
-    const saveBulletin = (dataUrl: string) => {
-      const bItem: Bulletin = {
-        id: 'b-' + Date.now(),
-        title: newBulletin.title,
-        volume: newBulletin.volume || `제36권 ${bulletins.length + 1}호`,
-        date: newBulletin.date || new Date().toISOString().slice(0, 10),
-        pdfUrl: dataUrl || 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-        fileName: bulletinFile?.name || 'uploaded_weekly_bulletin.pdf',
-        fileSize: bulletinFile ? `${(bulletinFile.size / 1024).toFixed(1)} KB` : '15.0 KB',
-        worshipOrder: newBulletin.worshipOrder || '예배 순서 및 성도의 대단락은 PDF 본문을 실시간 참고해 주십시오.',
-        announcements: newBulletin.announcements || '1. 금주 교회 세부 지상공지 내용과 일람은 교독문 및 소식란을 참고하세요.'
-      };
-      
-      const updated = [bItem, ...bulletins];
-      setBulletins(updated);
-      setSelectedBulletin(bItem);
-      localStorage.setItem('sm_pdf_bulletins', JSON.stringify(updated));
-      
-      // Reset
-      setNewBulletin({ title: '', volume: '', date: '', worshipOrder: '', announcements: '', pdfUrl: '' });
-      setBulletinFile(null);
-      alert('✅ 매주 주보 PDF 파일이 보관소에 성공적으로 등록되었습니다!');
+    const saveBulletin = async (dataUrl: string) => {
+      try {
+        const docId = 'b-' + Date.now();
+        await setDoc(doc(db, 'pdf_bulletins', docId), {
+          id: docId,
+          title: newBulletin.title,
+          date: newBulletin.date || new Date().toISOString().slice(0, 10),
+          pdfUrl: dataUrl || 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
+          views: 0,
+          createdAt: serverTimestamp()
+        });
+        
+        // Reset
+        setNewBulletin({ title: '', volume: '', date: '', worshipOrder: '', announcements: '', pdfUrl: '' });
+        setBulletinFile(null);
+        alert('✅ 매주 주보 파일이 보관소에 성공적으로 등록되었습니다!');
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.CREATE, 'pdf_bulletins');
+      }
     };
 
     if (bulletinFile) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        saveBulletin(event.target?.result as string);
-      };
-      reader.readAsDataURL(bulletinFile);
+      if (bulletinFile.type.startsWith('image/')) {
+        // Automatically compress image file (max 1000x1500, quality 0.7) to keep it under 500KB
+        compressImage(bulletinFile, 1000, 1500, 0.7)
+          .then((compressedData) => {
+            saveBulletin(compressedData);
+          })
+          .catch((err) => {
+            console.error(err);
+            alert('❌ 이미지 압축 중 에러가 발생했습니다. 다른 파일을 등록해 주세요.');
+          });
+      } else {
+        // Handle PDF file size checking (Firestore document limit 1MB, Base64 adds ~33% size)
+        const fileSizeInMB = bulletinFile.size / (1024 * 1024);
+        if (fileSizeInMB > 0.70) {
+          alert(`⚠️ PDF 파일의 용량이 불일치합니다 (현재 파일 크기: ${fileSizeInMB.toFixed(2)}MB).\n\nFirestore 클라우드 데이터베이스의 단일 문서 용량 제한(1MB) 및 Base64 인코딩 추가 용량 증적으로 인해 실제 용량이 0.7MB(700KB) 이하인 PDF 파일만 직접 실시간 등록이 가능합니다.\n\n해결방법:\n1. 'iLovePDF' 또는 'Adobe Acrobat PDF 압축' 등의 무료 온라인 서비스를 이용하여 PDF 용량을 0.7MB 이하로 압축한 뒤 올려주세요.\n2. 혹은 주보의 해상도를 낮춰서 스캔 후 업로드해주세요.\n3. 또는 주보를 이미지 파일(JPG, PNG)로 캡처·저장하여 선택하시면 고용량 이미지라도 시스템에서 초경량(Web-Optimized)으로 실시간 자동 압축하여 반영됩니다!`);
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          saveBulletin(event.target?.result as string);
+        };
+        reader.readAsDataURL(bulletinFile);
+      }
     } else {
       saveBulletin('');
     }
   };
 
-  const handleDeleteBulletin = (id: string) => {
+  const handleDeleteBulletin = async (id: string) => {
+    if (!checkMutationPermission()) return;
     if (confirm('선택하신 주간 주보를 보관소에서 삭제하시겠습니까?')) {
-      const updated = bulletins.filter(b => b.id !== id);
-      setBulletins(updated);
-      localStorage.setItem('sm_pdf_bulletins', JSON.stringify(updated));
-      if (selectedBulletin?.id === id) {
-        setSelectedBulletin(updated[0] || null);
+      try {
+        await deleteDoc(doc(db, 'pdf_bulletins', id));
+        if (selectedBulletin?.id === id) {
+          setSelectedBulletin(null);
+        }
+        alert('주보 삭제가 완료되었습니다.');
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.DELETE, `pdf_bulletins/${id}`);
       }
-      alert('주보 삭제가 완료되었습니다.');
     }
   };
 
-  const handleAddEvent = (e: React.FormEvent) => {
+  const handleAddEvent = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!checkMutationPermission()) return;
     if (!newEvent.title || !newEvent.date) {
       alert('행사 명명과 날짜 입력은 필수입니다.');
       return;
     }
-    const eItem: EventSchedule = {
-      id: 'e-' + Date.now(),
-      title: newEvent.title,
-      date: newEvent.date,
-      time: newEvent.time || '종일 행사',
-      location: newEvent.location || '교회 본관',
-      desc: newEvent.desc
-    };
-    const updated = [eItem, ...events];
-    setEvents(updated);
-    localStorage.setItem('sm_events', JSON.stringify(updated));
-    setNewEvent({ title: '', date: '', time: '', location: '', desc: '' });
-    alert('캘린더 일정에 행사가 추가되었습니다.');
+    try {
+      const docId = 'e-' + Date.now();
+      await setDoc(doc(db, 'events', docId), {
+        id: docId,
+        title: newEvent.title,
+        date: newEvent.date,
+        time: newEvent.time || '종일 행사',
+        loc: newEvent.location || '교회 본관',
+        desc: newEvent.desc || '',
+        createdAt: serverTimestamp()
+      });
+      setNewEvent({ title: '', date: '', time: '', location: '', desc: '' });
+      alert('캘린더 일정에 행사가 추가되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'events');
+    }
   };
 
-  const handleDeleteEvent = (id: string) => {
+  const handleDeleteEvent = async (id: string) => {
+    if (!checkMutationPermission()) return;
     if (confirm('해당 행사 구역을 철회할까요?')) {
-      const updated = events.filter(e => e.id !== id);
-      setEvents(updated);
-      localStorage.setItem('sm_events', JSON.stringify(updated));
-      if (editingEvent?.id === id) {
-        setEditingEvent(null);
+      try {
+        await deleteDoc(doc(db, 'events', id));
+        if (editingEvent?.id === id) {
+          setEditingEvent(null);
+        }
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.DELETE, `events/${id}`);
       }
     }
   };
 
-  const handleSaveEventEdit = (e: React.FormEvent) => {
+  const handleSaveEventEdit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!checkMutationPermission()) return;
     if (!editingEvent) return;
     if (!editingEvent.title || !editingEvent.date) {
       alert('행사 명칭과 날짜 입력은 필수입니다.');
       return;
     }
-    const updated = events.map(ev => ev.id === editingEvent.id ? editingEvent : ev);
-    setEvents(updated);
-    localStorage.setItem('sm_events', JSON.stringify(updated));
-    setEditingEvent(null);
-    alert('캘린더 일정 내용이 정확하게 정정되었습니다.');
+    try {
+      await updateDoc(doc(db, 'events', editingEvent.id), {
+        title: editingEvent.title,
+        date: editingEvent.date,
+        time: editingEvent.time,
+        loc: editingEvent.location,
+        desc: editingEvent.desc || ''
+      });
+      setEditingEvent(null);
+      alert('캘린더 일정 내용이 정확하게 정정되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `events/${editingEvent.id}`);
+    }
   };
 
   const handleGalleryFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -779,142 +1204,202 @@ export default function App() {
     }
   };
 
-  const handleAddGalleryItem = (e: React.FormEvent) => {
+  const handleAddGalleryItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdminAuthenticated) {
-      alert('관리자 권한을 가진 사용자만 사진을 등록할 수 있습니다. 먼저 로그인해 주세요.');
-      return;
-    }
+    if (!checkMutationPermission()) return;
     if (!newGalleryItem.title) {
       alert('사진 제목은 필수 항목입니다.');
       return;
     }
 
-    const saveItem = (imgData: string) => {
-      const gItem: GalleryItem = {
-        id: 'g-' + Date.now(),
-        title: newGalleryItem.title,
-        description: newGalleryItem.description || '상세 사역 기록 소개 없음',
-        imageUrl: imgData || newGalleryItem.imageUrl || '',
-        bgClass: !imgData && !newGalleryItem.imageUrl ? 'bg-emerald-950/10 text-emerald-800' : undefined,
-        date: newGalleryItem.date || new Date().toISOString().slice(0, 10)
-      };
+    try {
+      let compressedData = '';
+      if (galleryFile) {
+        compressedData = await compressImage(galleryFile, 800, 800, 0.7);
+      }
 
-      const updated = [gItem, ...galleryItems];
-      setGalleryItems(updated);
-      localStorage.setItem('sm_gallery', JSON.stringify(updated));
+      const docId = 'g-' + Date.now();
+      await setDoc(doc(db, 'gallery', docId), {
+        id: docId,
+        title: newGalleryItem.title,
+        remarks: newGalleryItem.description || '상세 사역 기록 소개 없음',
+        imageUrl: compressedData || newGalleryItem.imageUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2',
+        createdAt: serverTimestamp(),
+        date: newGalleryItem.date || new Date().toISOString().slice(0, 10)
+      });
       setNewGalleryItem({ title: '', description: '', imageUrl: '', date: '' });
       setGalleryFile(null);
       setGalleryPreview(null);
       alert('새로운 사진록이 연동 등록되었습니다.');
-    };
-
-    if (galleryFile) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        saveItem(event.target?.result as string);
-      };
-      reader.readAsDataURL(galleryFile);
-    } else {
-      saveItem('');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.CREATE, 'gallery');
     }
   };
 
-  const handleDeleteGalleryItem = (id: string, e?: React.MouseEvent) => {
+  const handleDeleteGalleryItem = async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    if (!isAdminAuthenticated) {
-      alert('관리자 권한이 필요합니다.');
-      return;
-    }
+    if (!checkMutationPermission()) return;
     if (confirm('이 사진 기록을 삭제하시겠습니까?')) {
-      const updated = galleryItems.filter(g => g.id !== id);
-      setGalleryItems(updated);
-      localStorage.setItem('sm_gallery', JSON.stringify(updated));
-      if (editingGalleryItem?.id === id) {
-        setEditingGalleryItem(null);
+      try {
+        await deleteDoc(doc(db, 'gallery', id));
+        if (editingGalleryItem?.id === id) {
+          setEditingGalleryItem(null);
+        }
+        alert('사진 기록이 영구 삭제되었습니다.');
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.DELETE, `gallery/${id}`);
       }
-      alert('사진 기록이 영구 삭제되었습니다.');
     }
   };
 
-  const handleSaveGalleryItemEdit = (e: React.FormEvent) => {
+  const handleSaveGalleryItemEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdminAuthenticated) {
-      alert('관리자 권한이 없습니다.');
-      return;
-    }
+    if (!checkMutationPermission()) return;
     if (!editingGalleryItem) return;
     if (!editingGalleryItem.title) {
       alert('사진 제목은 필수 항목입니다.');
       return;
     }
 
-    const saveItem = (imgData: string) => {
-      const updatedItem: GalleryItem = {
-        ...editingGalleryItem,
-        imageUrl: imgData || editingGalleryItem.imageUrl || '',
-        bgClass: !imgData && !editingGalleryItem.imageUrl ? 'bg-emerald-950/10 text-emerald-800' : undefined
-      };
+    try {
+      let compressedData = '';
+      if (galleryFile) {
+        compressedData = await compressImage(galleryFile, 800, 800, 0.7);
+      }
 
-      const updated = galleryItems.map(g => g.id === editingGalleryItem.id ? updatedItem : g);
-      setGalleryItems(updated);
-      localStorage.setItem('sm_gallery', JSON.stringify(updated));
+      await updateDoc(doc(db, 'gallery', editingGalleryItem.id), {
+        title: editingGalleryItem.title,
+        remarks: editingGalleryItem.description || '상세 사역 기록 소개 없음',
+        imageUrl: compressedData || editingGalleryItem.imageUrl || '',
+        date: editingGalleryItem.date || new Date().toISOString().slice(0, 10)
+      });
       setEditingGalleryItem(null);
       setGalleryFile(null);
       setGalleryPreview(null);
       alert('교회 추억 사진록 내용 정정이 정상 저장되었습니다.');
-    };
-
-    if (galleryFile) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        saveItem(event.target?.result as string);
-      };
-      reader.readAsDataURL(galleryFile);
-    } else {
-      saveItem('');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `gallery/${editingGalleryItem.id}`);
     }
   };
 
-  const handleSaveStaff = (e: React.FormEvent) => {
+  const handleSaveStaff = async (e: React.FormEvent) => {
     e.preventDefault();
-    localStorage.setItem('sm_staff_pastor', headPastor);
-    localStorage.setItem('sm_staff_evang', evangelists);
-    localStorage.setItem('sm_staff_elders', elders);
-    localStorage.setItem('sm_staff_mission_elders', missionElders);
-    alert('교회 섬기는 분들의 명단 정보가 정상적으로 저장/웹페이지에 반영되었습니다.');
+    if (!checkMutationPermission()) return;
+    try {
+      await setDoc(doc(db, 'settings', 'staff'), {
+        id: 'staff',
+        headPastor,
+        evangelists,
+        elders,
+        missionElders,
+        pastorImage,
+        adminEmails,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      alert('교회 섬기는 분들의 명단 정보가 정상적으로 저장/웹페이지에 반영되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'settings/staff');
+    }
   };
 
-  const handlePastorFileSelect = (file: File) => {
+  const handlePastorFileSelect = async (file: File) => {
+    if (!checkMutationPermission()) return;
     if (!file.type.startsWith('image/')) {
       alert('이미지 파일만 업로드할 수 있습니다.');
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const base64Data = e.target?.result as string;
-      setPastorImage(base64Data);
-      localStorage.setItem('sm_pastor_image', base64Data);
-    };
-    reader.readAsDataURL(file);
+    try {
+      // Crop to 1:1 and compress (max 256x256, JPEG quality 0.7)
+      const compressedData = await compressAndCropToSquare(file, 256, 0.7);
+      setPastorImage(compressedData);
+      
+      await setDoc(doc(db, 'settings', 'staff'), {
+        id: 'staff',
+        headPastor,
+        evangelists,
+        elders,
+        missionElders,
+        pastorImage: compressedData,
+        adminEmails,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      alert('담임목사님 사진이 규격(1:1)에 맞게 실시간 업로드 및 동기화되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, 'settings/staff');
+    }
   };
 
-  const handleToggleRegStatus = (id: string) => {
-    const updated = registrations.map(r => {
-      if (r.id === id) {
-        return { ...r, status: (r.status === '대기' ? '완료' : '대기') as '대기' | '완료' };
-      }
-      return r;
-    });
-    setRegistrations(updated);
-    localStorage.setItem('sm_registrations', JSON.stringify(updated));
+  const handleToggleRegStatus = async (id: string) => {
+    if (!checkMutationPermission()) return;
+    const registration = registrations.find(r => r.id === id);
+    if (!registration) return;
+    const newStatus = registration.status === '대기' ? '완료' : '대기';
+    try {
+      await updateDoc(doc(db, 'registrations', id), {
+        status: newStatus
+      });
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `registrations/${id}`);
+    }
   };
 
-  const handleDeleteReg = (id: string) => {
+  const handleDeleteReg = async (id: string) => {
+    if (!checkMutationPermission()) return;
     if (confirm('새가족 신청 명단을 메인 기록에서 완전히 삭제할까요?')) {
-      const updated = registrations.filter(r => r.id !== id);
-      setRegistrations(updated);
-      localStorage.setItem('sm_registrations', JSON.stringify(updated));
+      try {
+        await deleteDoc(doc(db, 'registrations', id));
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.DELETE, `registrations/${id}`);
+      }
+    }
+  };
+
+  const handleSaveRegistrationEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRegistration) return;
+    if (!checkMutationPermission()) return;
+    try {
+      await updateDoc(doc(db, 'registrations', editingRegistration.id), {
+        name: editingRegistration.name,
+        phone: editingRegistration.phone,
+        email: editingRegistration.email || '',
+        address: editingRegistration.address || '',
+        birthDate: editingRegistration.birthDate || '',
+        remark: editingRegistration.notes || '',
+        status: editingRegistration.status || '대기'
+      });
+      setEditingRegistration(null);
+      alert('새가족 정보가 성공적으로 정정되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `registrations/${editingRegistration.id}`);
+    }
+  };
+
+  const handleSavePrayerEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPrayer) return;
+    if (!checkMutationPermission()) return;
+    try {
+      await updateDoc(doc(db, 'prayers', editingPrayer.id), {
+        author: editingPrayer.author,
+        content: editingPrayer.content,
+        isPrivate: editingPrayer.isPrivate
+      });
+      setEditingPrayer(null);
+      alert('중보기도 내용이 성공적으로 수정되었습니다.');
+    } catch (err: any) {
+      handleFirestoreError(err, OperationType.UPDATE, `prayers/${editingPrayer.id}`);
+    }
+  };
+
+  const handleDeletePrayer = async (id: string) => {
+    if (!checkMutationPermission()) return;
+    if (confirm('이 중보기도를 메인 목록에서 완전히 삭제하시겠습니까?')) {
+      try {
+        await deleteDoc(doc(db, 'prayers', id));
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.DELETE, `prayers/${id}`);
+      }
     }
   };
 
@@ -2264,11 +2749,11 @@ export default function App() {
                     </div>
 
                     <div>
-                      <label className="block text-gray-700 font-semibold mb-1 text-[11px]">실물 PDF 파일 선택 *</label>
+                      <label className="block text-gray-700 font-semibold mb-1 text-[11px]">실물 PDF 또는 주보 이미지 파일 선택 *</label>
                       <div className="flex items-center gap-2 bg-white border p-2 rounded-xl">
                         <input 
                           type="file"
-                          accept="application/pdf"
+                          accept="application/pdf, image/*"
                           required
                           onChange={(e) => {
                             if (e.target.files && e.target.files[0]) {
@@ -2278,6 +2763,9 @@ export default function App() {
                           className="w-full text-[10px] text-gray-500 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:text-[10px] file:bg-[#2D5A27]/10 file:text-[#2D5A27] cursor-pointer"
                         />
                       </div>
+                      <p className="text-[9.5px] text-gray-400 mt-1.5 leading-normal">
+                        ※ 권장사항: PDF 파일 업로드시 용량이 1MB 이하여야 저장이 정상 처리됩니다. 1MB를 초과하는 대용량 주보는 주보 이미지 파일(PNG/JPG)로 직접 업로드 시 최적화 압축되어 자동 변환·등록됩니다!
+                      </p>
                     </div>
 
                     <button 
@@ -2334,11 +2822,22 @@ export default function App() {
                     {/* Viewer Frame Container */}
                     <div className="bg-[#FCFAF6] border border-gray-200 rounded-2xl p-4 min-h-[480px] flex flex-col justify-between">
                       <div className="space-y-4 flex flex-col flex-grow">
-                        <iframe 
-                          src={selectedBulletin.pdfUrl}
-                          className="w-full h-[520px] rounded-xl border bg-white shadow-inner flex-grow"
-                          title="Interactive Bulletin PDF Reader"
-                        />
+                        {selectedBulletin.pdfUrl.startsWith('data:image/') ? (
+                          <div className="w-full h-[520px] rounded-xl border bg-white shadow-inner flex-grow overflow-auto p-2 flex justify-center items-start">
+                            <img 
+                              src={selectedBulletin.pdfUrl}
+                              alt={selectedBulletin.title}
+                              className="max-w-full h-auto object-contain rounded-lg shadow-sm"
+                              referrerPolicy="no-referrer"
+                            />
+                          </div>
+                        ) : (
+                          <iframe 
+                            src={selectedBulletin.pdfUrl}
+                            className="w-full h-[520px] rounded-xl border bg-white shadow-inner flex-grow"
+                            title="Interactive Bulletin PDF Reader"
+                          />
+                        )}
                         <p className="text-[10px] text-gray-400 text-center leading-relaxed">
                           💡 브라우저 인라인 PDF 방침 혹은 iFrame 정책에 따라 화면이 보이지 않을 경우, 상단의 <strong className="text-gray-600">[PDF 새창 열람]</strong> 또는 <strong className="text-gray-600">[다운로드]</strong>를 통해 편하게 실물 주보를 수령하실 수 있습니다!
                         </p>
@@ -2762,7 +3261,7 @@ export default function App() {
               </span>
               {isAdminAuthenticated && (
                 <button 
-                  onClick={() => setIsAdminAuthenticated(false)}
+                  onClick={handleAdminLogout}
                   className="bg-red-100 text-red-600 border border-red-200 text-xs px-3 py-1.5 rounded-xl hover:bg-red-200"
                 >
                   로그아웃
@@ -2795,13 +3294,130 @@ export default function App() {
                     type="submit"
                     className="w-full py-2.5 bg-[#2D5A27] hover:bg-emerald-950 text-white font-extrabold rounded-xl text-xs transition-all"
                   >
-                    관리자 대시보드 진입
+                    일반 로그인 (조회 모드)
                   </button>
                 </form>
+
+                <div className="relative flex py-4 items-center">
+                  <div className="flex-grow border-t border-gray-200"></div>
+                  <span className="flex-shrink mx-4 text-gray-400 text-xs">또는</span>
+                  <div className="flex-grow border-t border-gray-200"></div>
+                </div>
+
+                <div className="space-y-2">
+                  <button 
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const googleUser = await logInWithGoogle();
+                        if (googleUser) {
+                          const email = googleUser.email || '';
+                          const isGoogleAdmin = isUserAdmin(email) || adminEmails.map(e => e.toLowerCase()).includes(email.toLowerCase());
+                          if (isGoogleAdmin) {
+                            setIsAdminAuthenticated(true);
+                            setIsGoogleAdminUser(true);
+                            setAdminLoginError('');
+                          } else {
+                            await logOutFromFirebase();
+                            setAdminLoginError('등록된 관리자 구글 계정(mintjamong99@gmail.com 등)이 아닙니다.');
+                          }
+                        }
+                      } catch (err: any) {
+                        setAdminLoginError('구글 로그인 중 오류가 발생했습니다.');
+                      }
+                    }}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-white border border-gray-300 text-gray-700 font-bold rounded-xl text-xs hover:bg-gray-50 transition-all shadow-sm"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" width="16" height="16">
+                      <path fill="#EA4335" d="M12 5.04c1.67 0 3.14.58 4.31 1.7L19.5 3.5C17.48 1.63 14.93.5 12 .5 7.42.5 3.53 3.12 1.63 6.95l3.87 3a6.97 6.97 0 0 1 6.5-4.91z" />
+                      <path fill="#4285F4" d="M23.5 12.25c0-.82-.07-1.61-.21-2.38H12v4.51h6.46a5.52 5.52 0 0 1-2.4 3.62l3.73 2.9c2.18-2 3.71-4.96 3.71-8.65z" fillRule="evenodd" clipRule="evenodd" />
+                      <path fill="#FBBC05" d="M5.5 14.53a6.94 6.94 0 0 1 0-5.06l-3.87-3A11.96 11.96 0 0 0 .5 12c0 2.02.51 3.93 1.39 5.61l3.61-3.08z" fillRule="evenodd" clipRule="evenodd" />
+                      <path fill="#34A853" d="M12 23.5c3.24 0 5.97-1.08 7.96-2.9l-3.73-2.9c-1.1.75-2.52 1.19-4.23 1.19a6.97 6.97 0 0 1-6.5-4.91l-3.87 3A11.93 11.93 0 0 0 12 23.5z" fillRule="evenodd" clipRule="evenodd" />
+                    </svg>
+                    Google 관리자 계정으로 로그인 (수정/삭제 권한)
+                  </button>
+                  <p className="text-[10px] text-gray-400 mt-2">
+                    데이터 수정/삭제 작업을 하시려면 반드시 등록된 구글 계정으로 로그인해 주십시오. (Firestore 규칙 실시간 연동 강화)
+                  </p>
+                </div>
               </div>
             ) : (
               // CMS MAIN DASHBOARD
               <div className="space-y-8">
+
+                {/* 1. Admin Emails Manager (Max 5) */}
+                <div id="admin_emails_manager" className="bg-white border rounded-3xl p-6 shadow-sm">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between border-b pb-3 mb-4 gap-2">
+                    <div>
+                      <h3 className="font-bold text-gray-800 text-sm flex items-center gap-1.5">
+                        👤 시스템 관리자 설정 <span className="text-[#2D5A27] font-mono">({adminEmails.length}/5명)</span>
+                      </h3>
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        데이터 수정/삭제 권한이 부여되는 Google 로그인 계정을 등록·해제합니다. (최대 5명 제한)
+                      </p>
+                    </div>
+                    {!isGoogleAdminUser && (
+                      <span className="shrink-0 text-[10px] bg-amber-50 text-[#D69E2E] border border-amber-200 px-2 py-1 rounded-lg font-bold">
+                        ⚠️ 일반 로그인 조회 모드 (정정/삭제 불가)
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5 text-xs">
+                    {/* Add Admin form */}
+                    <form onSubmit={handleAddAdminEmail} className="space-y-3">
+                      <div>
+                        <label className="block text-gray-700 font-bold mb-1">새 관리자 Google 이메일 등록</label>
+                        <div className="flex gap-2">
+                          <input 
+                            type="email" 
+                            required
+                            disabled={!isGoogleAdminUser || adminEmails.length >= 5}
+                            placeholder={adminEmails.length >= 5 ? "최대인원(5명) 가득 참" : "example@gmail.com"}
+                            value={newAdminEmail}
+                            onChange={(e) => setNewAdminEmail(e.target.value)}
+                            className="flex-1 border p-2.5 rounded-xl bg-gray-50 focus:outline-none disabled:opacity-50"
+                          />
+                          <button 
+                            type="submit"
+                            disabled={!isGoogleAdminUser || adminEmails.length >= 5}
+                            className="bg-[#2D5A27] hover:bg-opacity-90 disabled:bg-gray-300 text-white px-4 py-2.5 rounded-xl font-bold transition-all shrink-0 cursor-pointer text-xs"
+                          >
+                            등록
+                          </button>
+                        </div>
+                        <p className="text-[10px] text-gray-400 mt-1.5">
+                          ※ 등록 즉시 Firestore Security Rules 실시간 정책 데이터에 반영되어 수정 및 삭제 권한이 위임됩니다.
+                        </p>
+                      </div>
+                    </form>
+
+                    {/* Admin List */}
+                    <div>
+                      <label className="block text-gray-700 font-bold mb-1">등록된 관리자 목록</label>
+                      <div className="border rounded-2xl divide-y bg-gray-50 overflow-hidden max-h-[140px] overflow-y-auto">
+                        {adminEmails.map(email => (
+                          <div key={email} className="p-2.5 flex justify-between items-center bg-white hover:bg-gray-50">
+                            <span className="font-mono text-gray-700 font-medium">{email}</span>
+                            {email.toLowerCase() !== 'mintjamong99@gmail.com' ? (
+                              <button 
+                                type="button"
+                                disabled={!isGoogleAdminUser}
+                                onClick={() => handleRemoveAdminEmail(email)}
+                                className="text-red-500 hover:text-red-700 disabled:opacity-30 p-1 cursor-pointer"
+                                title="권한 삭제"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            ) : (
+                              <span className="text-[10px] text-gray-400 font-bold bg-gray-100 px-1.5 py-0.5 rounded">소유자</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 
                 {/* 2. Sermons Manager */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -3595,6 +4211,285 @@ export default function App() {
                           </div>
                         </div>
                       ))}
+                    </div>
+                  </div>
+
+                </div>
+
+                {/* 5-B. Registrations & Prayers CMS Manager */}
+                <h3 className="font-serif font-bold text-lg text-gray-800 mt-8 mb-3 border-l-4 border-emerald-600 pl-3">
+                  📋 새가족 등록 및 중보기도 신청 현황 통합 관리
+                </h3>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+                  {/* Panel A: 새가족 신청 명단 목록확인 */}
+                  <div className="bg-white border rounded-3xl p-6 shadow-sm flex flex-col justify-between min-h-[420px]">
+                    <div>
+                      <div className="flex items-center justify-between border-b pb-2 mb-4">
+                        <h4 className="font-bold text-gray-800 text-sm flex items-center gap-1.5 bg-white">
+                          🌱 새가족 등록 신청 명단 ({registrations.length}명)
+                        </h4>
+                      </div>
+
+                      {editingRegistration ? (
+                        <form onSubmit={handleSaveRegistrationEdit} className="space-y-3 text-xs bg-emerald-50/40 p-3.5 border rounded-2xl">
+                          <p className="font-bold text-[#2D5A27] text-xs">✏️ 새가족 정보 정정 (수정)</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">성명 *</label>
+                              <input 
+                                type="text" 
+                                required
+                                value={editingRegistration.name}
+                                onChange={(e) => setEditingRegistration({ ...editingRegistration, name: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">연락처 *</label>
+                              <input 
+                                type="text" 
+                                required
+                                value={editingRegistration.phone}
+                                onChange={(e) => setEditingRegistration({ ...editingRegistration, phone: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">이메일</label>
+                              <input 
+                                type="email" 
+                                value={editingRegistration.email}
+                                onChange={(e) => setEditingRegistration({ ...editingRegistration, email: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">생년월일</label>
+                              <input 
+                                type="text" 
+                                placeholder="YYYY-MM-DD"
+                                value={editingRegistration.birthDate}
+                                onChange={(e) => setEditingRegistration({ ...editingRegistration, birthDate: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-gray-700 font-bold mb-1">거주 주소</label>
+                            <input 
+                              type="text" 
+                              value={editingRegistration.address}
+                              onChange={(e) => setEditingRegistration({ ...editingRegistration, address: e.target.value })}
+                              className="w-full border p-2 rounded-lg bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-gray-700 font-bold mb-1">건의/비고 설명</label>
+                            <textarea 
+                              value={editingRegistration.notes}
+                              onChange={(e) => setEditingRegistration({ ...editingRegistration, notes: e.target.value })}
+                              className="w-full border p-2 rounded-lg bg-white h-16 resize-none"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">진행 현황</label>
+                              <select
+                                value={editingRegistration.status}
+                                onChange={(e) => setEditingRegistration({ ...editingRegistration, status: e.target.value as any })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                              >
+                                <option value="대기">대기</option>
+                                <option value="완료">완료</option>
+                              </select>
+                            </div>
+                            <div className="flex items-end gap-1.5 justify-end">
+                              <button 
+                                type="button"
+                                onClick={() => setEditingRegistration(null)}
+                                className="bg-gray-100 border text-gray-650 hover:bg-gray-200 px-3 py-2 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                              >
+                                취소
+                              </button>
+                              <button 
+                                type="submit"
+                                className="bg-[#2D5A27] text-white hover:bg-opacity-95 px-3 py-2 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                              >
+                                저장
+                              </button>
+                            </div>
+                          </div>
+                        </form>
+                      ) : (
+                        <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
+                          {registrations.length === 0 ? (
+                            <p className="text-[11px] text-gray-400 py-8 text-center animate-pulse">신청 건이 아직 없습니다.</p>
+                          ) : (
+                            registrations.map(reg => (
+                              <div key={reg.id} className="p-3 bg-gray-50 border border-gray-150 rounded-2xl flex flex-col justify-between text-xs hover:shadow-sm transition-all">
+                                <div className="flex justify-between items-start gap-2 border-b border-gray-200 pb-1.5 mb-1.5">
+                                  <div>
+                                    <span className="font-extrabold text-gray-900 text-sm">{reg.name}</span>
+                                    <span className="ml-2 text-[10px] text-gray-400 font-mono">{reg.createdAt}</span>
+                                  </div>
+                                  <button
+                                    onClick={() => handleToggleRegStatus(reg.id)}
+                                    className={`px-2 py-0.5 rounded-full font-bold text-[9px] hover:scale-105 transition-all text-center ${
+                                      reg.status === '완료' 
+                                      ? 'bg-emerald-100 text-emerald-800' 
+                                      : 'bg-amber-100 mr-2 text-amber-850 border border-amber-200'
+                                    }`}
+                                    title="클릭하여 현황 변경"
+                                  >
+                                    {reg.status}
+                                  </button>
+                                </div>
+                                <div className="space-y-1 text-[11px] text-gray-650 font-sans">
+                                  <p><span className="font-semibold text-gray-450 mr-1.5 inline-block w-12">연락처</span> {reg.phone}</p>
+                                  {reg.email && <p><span className="font-semibold text-gray-450 mr-1.5 inline-block w-12">이메일</span> {reg.email}</p>}
+                                  {reg.birthDate && <p><span className="font-semibold text-gray-450 mr-1.5 inline-block w-12">생년월일</span> {reg.birthDate}</p>}
+                                  {reg.address && <p><span className="font-semibold text-gray-450 mr-1.5 inline-block w-12">거주주소</span> {reg.address}</p>}
+                                  {reg.notes && (
+                                    <div className="mt-1.5 p-2 bg-gray-100 rounded-xl text-gray-700 whitespace-pre-line text-[10px] italic leading-relaxed border">
+                                      {reg.notes}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex justify-end gap-1.5 mt-3 pt-2 border-t border-gray-155">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingRegistration(reg)}
+                                    className="px-2.5 py-1 text-[10px] bg-white border text-gray-700 hover:bg-gray-100 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                                  >
+                                    ✏️ 수정
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteReg(reg.id)}
+                                    className="px-2.5 py-1 text-[10px] bg-white border text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                                  >
+                                    <Trash2 className="w-3 h-3" /> 삭제
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Panel B: 중보기도 신청 명단 */}
+                  <div className="bg-white border rounded-3xl p-6 shadow-sm flex flex-col justify-between min-h-[420px]">
+                    <div>
+                      <div className="flex items-center justify-between border-b pb-2 mb-4">
+                        <h4 className="font-bold text-gray-800 text-sm flex items-center gap-1.5 bg-white">
+                          🙏 중보기도 청원 목록 ({prayers.length}건)
+                        </h4>
+                      </div>
+
+                      {editingPrayer ? (
+                        <form onSubmit={handleSavePrayerEdit} className="space-y-3 text-xs bg-amber-50/40 p-3.5 border rounded-2xl">
+                          <p className="font-bold text-amber-700 text-xs">✏️ 중보기도 내용 정정 (수정)</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">성명 (청원자) *</label>
+                              <input 
+                                type="text" 
+                                required
+                                value={editingPrayer.author}
+                                onChange={(e) => setEditingPrayer({ ...editingPrayer, author: e.target.value })}
+                                className="w-full border p-2 rounded-lg bg-white"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-gray-700 font-bold mb-1">공개 상태 설정</label>
+                              <div className="flex items-center gap-2 h-9">
+                                <input 
+                                  type="checkbox" 
+                                  id="editPrayerIsPrivate"
+                                  checked={editingPrayer.isPrivate}
+                                  onChange={(e) => setEditingPrayer({ ...editingPrayer, isPrivate: e.target.checked })}
+                                  className="rounded text-[#2D5A27] focus:ring-[#2D5A27]"
+                                />
+                                <label htmlFor="editPrayerIsPrivate" className="text-gray-700 font-semibold cursor-pointer select-none">
+                                  🔒 비공개 처리
+                                </label>
+                              </div>
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-gray-700 font-bold mb-1">기도 제목 및 청원 내용 *</label>
+                            <textarea 
+                              required
+                              value={editingPrayer.content}
+                              onChange={(e) => setEditingPrayer({ ...editingPrayer, content: e.target.value })}
+                              className="w-full border p-2 rounded-lg bg-white h-24"
+                            />
+                          </div>
+                          <div className="flex justify-end gap-1.5 pt-1.5">
+                            <button 
+                              type="button"
+                              onClick={() => setEditingPrayer(null)}
+                              className="bg-gray-150 border text-gray-700 hover:bg-gray-200 px-3 py-2 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                            >
+                              취소
+                            </button>
+                            <button 
+                              type="submit"
+                              className="bg-[#2D5A27] text-white hover:bg-opacity-95 px-3 py-2 rounded-lg font-bold transition-all text-[11px] cursor-pointer"
+                            >
+                              저장
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
+                          {prayers.length === 0 ? (
+                            <p className="text-[11px] text-gray-400 py-8 text-center animate-pulse">중보기도 등록 목록이 없습니다.</p>
+                          ) : (
+                            prayers.map(pr => (
+                              <div key={pr.id} className="p-3 bg-gray-50 border border-gray-150 rounded-2xl flex flex-col justify-between text-xs hover:shadow-sm transition-all">
+                                <div className="flex justify-between items-start gap-2 border-b border-gray-200 pb-1.5 mb-1.5">
+                                  <div>
+                                    <span className="font-extrabold text-gray-900 text-sm">{pr.author}</span>
+                                    <span className="ml-2 text-[10px] text-gray-400 font-mono">{pr.date || pr.createdAt}</span>
+                                  </div>
+                                  <span className={`px-2 py-0.5 rounded-full font-bold text-[9px] ${
+                                    pr.isPrivate 
+                                    ? 'bg-red-50 text-red-600 border border-red-100' 
+                                    : 'bg-[#2D5A27]/15 text-[#2D5A27]'
+                                  }`}>
+                                    {pr.isPrivate ? '🔒 비공개' : '🔓 전체공개'}
+                                  </span>
+                                </div>
+                                <p className="text-gray-700 whitespace-pre-line text-[11px] leading-relaxed italic my-1 font-sans">
+                                  {pr.content}
+                                </p>
+                                <div className="flex justify-end gap-1.5 mt-3 pt-2 border-t border-gray-155">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingPrayer(pr)}
+                                    className="px-2.5 py-1 text-[10px] bg-white border text-gray-700 hover:bg-gray-100 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                                  >
+                                    ✏️ 수정
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeletePrayer(pr.id)}
+                                    className="px-2.5 py-1 text-[10px] bg-white border text-red-650 hover:bg-red-50 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                                  >
+                                    <Trash2 className="w-3 h-3" /> 삭제
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 

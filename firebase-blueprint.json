@@ -1,0 +1,161 @@
+{
+  "entities": {
+    "Sermon": {
+      "title": "Sermon",
+      "description": "Weekly worship sermon records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "preacher": { "type": "string" },
+        "scripture": { "type": "string" },
+        "date": { "type": "string" },
+        "type": { "type": "string", "enum": ["sunday", "wednesday", "friday", "special"] },
+        "youtubeId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "preacher", "scripture", "date", "type", "youtubeId", "createdAt"]
+    },
+    "Notice": {
+      "title": "Notice",
+      "description": "Church news, announcements and bulletin announcements",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "date": { "type": "string" },
+        "author": { "type": "string" },
+        "isPinned": { "type": "boolean" },
+        "category": { "type": "string", "enum": ["notice", "worship", "bulletin"] },
+        "views": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "content", "date", "author", "category", "views", "createdAt"]
+    },
+    "Event": {
+      "title": "Event",
+      "description": "Church calendar event scheduling",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "loc": { "type": "string" },
+        "desc": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "date", "time", "loc", "desc", "createdAt"]
+    },
+    "Registration": {
+      "title": "Registration",
+      "description": "Activity registrations submitted by users",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "dept": { "type": "string" },
+        "remark": { "type": "string" },
+        "date": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "phone", "dept", "date", "createdAt"]
+    },
+    "Prayer": {
+      "title": "Prayer",
+      "description": "Prayer requests submitted by church members",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "author": { "type": "string" },
+        "content": { "type": "string" },
+        "date": { "type": "string" },
+        "isPrivate": { "type": "boolean" },
+        "praises": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "author", "content", "date", "isPrivate", "praises", "createdAt"]
+    },
+    "PdfBulletin": {
+      "title": "PdfBulletin",
+      "description": "Weekly bulletin PDF document records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "string" },
+        "pdfUrl": { "type": "string" },
+        "views": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "date", "pdfUrl", "views", "createdAt"]
+    },
+    "Gallery": {
+      "title": "Gallery",
+      "description": "Church activity photos",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "category": { "type": "string" },
+        "remarks": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "date", "imageUrl", "category", "createdAt"]
+    },
+    "Settings": {
+      "title": "Settings",
+      "description": "Global church metadata and staff configuration",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "headPastor": { "type": "string" },
+        "evangelists": { "type": "string" },
+        "elders": { "type": "string" },
+        "missionElders": { "type": "string" },
+        "pastorImage": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "headPastor", "evangelists", "elders", "missionElders", "pastorImage", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "sermons/{sermonId}": {
+      "schema": "Sermon",
+      "description": "Sermons of the church"
+    },
+    "notices/{noticeId}": {
+      "schema": "Notice",
+      "description": "Church notices and bulletin info"
+    },
+    "events/{eventId}": {
+      "schema": "Event",
+      "description": "Event calendar days"
+    },
+    "registrations/{registrationId}": {
+      "schema": "Registration",
+      "description": "Registrations submitted for next generation or activities"
+    },
+    "prayers/{prayerId}": {
+      "schema": "Prayer",
+      "description": "Prayer requests"
+    },
+    "pdf_bulletins/{bulletinId}": {
+      "schema": "PdfBulletin",
+      "description": "Church bulletin PDF records"
+    },
+    "gallery/{galleryId}": {
+      "schema": "Gallery",
+      "description": "Church activity gallery"
+    },
+    "settings/{settingsId}": {
+      "schema": "Settings",
+      "description": "Global configurations"
+    }
+  }
+}

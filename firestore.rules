@@ -1,0 +1,219 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE HELPER FUNCTIONS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn();
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'mintjamong99@gmail.com' ||
+        request.auth.token.email == 'seminary1991@gmail.com' ||
+        (exists(/databases/$(database)/documents/settings/staff) && 
+         "adminEmails" in get(/databases/$(database)/documents/settings/staff).data &&
+         request.auth.token.email in get(/databases/$(database)/documents/settings/staff).data.adminEmails)
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- VALIDATION BLUEPRINTS ---
+
+    // 1. Sermon Validation
+    function isValidSermon(data) {
+      return data.keys().hasAll(['id', 'title', 'preacher', 'scripture', 'date', 'youtubeId', 'createdAt']) &&
+             data.keys().size() == 7 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.preacher is string && data.preacher.size() <= 100 &&
+             data.scripture is string && data.scripture.size() <= 300 &&
+             data.date is string && data.date.size() <= 50 &&
+             data.youtubeId is string && data.youtubeId.size() <= 50;
+    }
+
+    // 2. Notice Validation
+    function isValidNotice(data) {
+      return data.keys().hasAll(['id', 'title', 'content', 'date', 'author', 'category', 'views', 'createdAt']) &&
+             (data.keys().size() == 8 || (data.keys().size() == 9 && data.isPinned is bool)) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.content is string && data.content.size() <= 10000 &&
+             data.date is string && data.date.size() <= 50 &&
+             data.author is string && data.author.size() <= 100 &&
+             data.category is string && (data.category == 'notice' || data.category == 'worship' || data.category == 'bulletin' || data.category == '공지' || data.category == '소식' || data.category == '행사' || data.category == '주보') &&
+             data.views is number;
+    }
+
+    // 3. Event Validation
+    function isValidEvent(data) {
+      return data.keys().hasAll(['id', 'title', 'date', 'time', 'loc', 'desc', 'createdAt']) &&
+             data.keys().size() == 7 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.date is string && data.date.size() <= 50 &&
+             data.time is string && data.time.size() <= 50 &&
+             data.loc is string && data.loc.size() <= 200 &&
+             data.desc is string && data.desc.size() <= 1000;
+    }
+
+    // 4. Registration Validation
+    function isValidRegistration(data) {
+      return data.keys().hasAll(['id', 'name', 'phone', 'dept', 'createdAt']) &&
+             data.keys().size() >= 5 && data.keys().size() <= 11 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.phone is string && data.phone.size() <= 50 &&
+             data.dept is string && data.dept.size() <= 100 &&
+             (!("date" in data) || (data.date is string && data.date.size() <= 50)) &&
+             (!("status" in data) || (data.status is string && (data.status == '대기' || data.status == '완료'))) &&
+             (!("email" in data) || (data.email is string && data.email.size() <= 100)) &&
+             (!("address" in data) || (data.address is string && data.address.size() <= 300)) &&
+             (!("birthDate" in data) || (data.birthDate is string && data.birthDate.size() <= 50)) &&
+             (!("remark" in data) || (data.remark is string && data.remark.size() <= 1000));
+    }
+
+    // 5. Prayer Validation
+    function isValidPrayer(data) {
+      return data.keys().hasAll(['id', 'title', 'author', 'content', 'date', 'isPrivate', 'praises', 'createdAt']) &&
+             data.keys().size() == 8 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.author is string && data.author.size() <= 100 &&
+             data.content is string && data.content.size() <= 5000 &&
+             data.date is string && data.date.size() <= 50 &&
+             data.isPrivate is bool &&
+             data.praises is number;
+    }
+
+    // 6. PdfBulletin Validation
+    function isValidPdfBulletin(data) {
+      return data.keys().hasAll(['id', 'title', 'date', 'pdfUrl', 'views', 'createdAt']) &&
+             data.keys().size() == 6 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.date is string && data.date.size() <= 50 &&
+             data.pdfUrl is string && data.pdfUrl.size() <= 5000000 &&
+             data.views is number;
+    }
+
+    // 7. Gallery Validation
+    function isValidGallery(data) {
+      return data.keys().hasAll(['id', 'title', 'date', 'imageUrl', 'createdAt']) &&
+             data.keys().size() >= 5 && data.keys().size() <= 7 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.date is string && data.date.size() <= 50 &&
+             data.imageUrl is string && data.imageUrl.size() <= 5000000 &&
+             (!("remarks" in data) || (data.remarks is string && data.remarks.size() <= 1000)) &&
+             (!("category" in data) || (data.category is string && data.category.size() <= 100));
+    }
+
+    // 8. Settings Validation
+    function isValidSettings(data) {
+      return data.keys().hasAll(['id', 'headPastor', 'evangelists', 'elders', 'missionElders', 'pastorImage', 'updatedAt']) &&
+             data.keys().size() >= 7 && data.keys().size() <= 8 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.headPastor is string && data.headPastor.size() <= 1000 &&
+             data.evangelists is string && data.evangelists.size() <= 1000 &&
+             data.elders is string && data.elders.size() <= 1000 &&
+             data.missionElders is string && data.missionElders.size() <= 1000 &&
+             data.pastorImage is string && data.pastorImage.size() <= 5000000 &&
+             (!("adminEmails" in data) || (data.adminEmails is list && data.adminEmails.size() <= 5));
+    }
+
+
+    // --- SECURITY RULE DEFINITIONS FOR COLLECTIONS ---
+
+    // 1. Sermons Collection
+    match /sermons/{sermonId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(sermonId) && isValidSermon(incoming()) && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidSermon(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin();
+    }
+
+    // 2. Notices Collection
+    match /notices/{noticeId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(noticeId) && isValidNotice(incoming()) && incoming().createdAt == request.time;
+      allow update: if (isAdmin() && isValidNotice(incoming()) && incoming().createdAt == existing().createdAt) || 
+                    // Allow anyone to increment views
+                    (incoming().diff(existing()).affectedKeys().hasOnly(['views']) && incoming().views == existing().views + 1);
+      allow delete: if isAdmin();
+    }
+
+    // 3. Events Collection
+    match /events/{eventId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(eventId) && isValidEvent(incoming()) && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidEvent(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin();
+    }
+
+    // 4. Registrations Collection
+    match /registrations/{registrationId} {
+      // PII Protection: Only Admin can read all registrations
+      allow read, list: if isAdmin();
+      allow get: if isAdmin() || (isSignedIn() && existing().phone == request.auth.token.phone_number);
+      allow create: if isValidId(registrationId) && isValidRegistration(incoming()) && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidRegistration(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin();
+    }
+
+    // 5. Prayers Collection
+    match /prayers/{prayerId} {
+      allow read: if true;
+      allow create: if isValidId(prayerId) && isValidPrayer(incoming()) && incoming().createdAt == request.time;
+      allow update: if (isAdmin() && isValidPrayer(incoming()) && incoming().createdAt == existing().createdAt) ||
+                    // Allow anyone to praise a prayer
+                    (incoming().diff(existing()).affectedKeys().hasOnly(['praises']) && incoming().praises == existing().praises + 1);
+      allow delete: if isAdmin();
+    }
+
+    // 6. PdfBulletins Collection
+    match /pdf_bulletins/{bulletinId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(bulletinId) && isValidPdfBulletin(incoming()) && incoming().createdAt == request.time;
+      allow update: if (isAdmin() && isValidPdfBulletin(incoming()) && incoming().createdAt == existing().createdAt) ||
+                    // Allow anyone to increment views
+                    (incoming().diff(existing()).affectedKeys().hasOnly(['views']) && incoming().views == existing().views + 1);
+      allow delete: if isAdmin();
+    }
+
+    // 7. Gallery Collection
+    match /gallery/{galleryId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(galleryId) && isValidGallery(incoming()) && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidGallery(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin();
+    }
+
+    // 8. Settings Collection
+    match /settings/{settingsId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isValidId(settingsId) && isValidSettings(incoming()) && incoming().updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+  }
+}
